@@ -68,3 +68,19 @@ can even `cdk synth`/`cdk deploy` this stack. Both are things only you can do:
 4. The fit threshold (`FIT_THRESHOLD`, default `0.7`) that decides when an alert fires
    is also just a stack constant in `jobpulse_stack.py` — adjust it there if 0.7 is too
    strict/loose once you're watching real scores come through.
+
+## Smoke-testing the query API (Phase 8)
+
+After `cdk deploy`, the stack outputs (`cdk deploy` prints them, or `aws cloudformation
+describe-stacks --stack-name JobPulseStack`) include the API Gateway's invoke URL and
+the query API's API key ID. Retrieve the actual key value and call the API:
+
+```
+API_KEY=$(aws apigateway get-api-key --api-key <key-id-from-stack-output> --include-value --query value --output text)
+
+curl -H "x-api-key: $API_KEY" "https://<api-id>.execute-api.<region>.amazonaws.com/prod/?min_score=0.7&remote_status=remote&limit=10"
+```
+
+Expect `{"postings": [...], "count": N}` on success, `{"error": "..."}` with a 400
+status for a malformed query param (e.g. non-numeric `min_score`), and a 403 from API
+Gateway itself (before the Lambda even runs) if `x-api-key` is missing or wrong.

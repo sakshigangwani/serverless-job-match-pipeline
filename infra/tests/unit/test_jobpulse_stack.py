@@ -468,3 +468,73 @@ def test_alert_email_lambda_is_subscribed_to_the_alerts_topic():
 
     template.resource_count_is("AWS::SNS::Subscription", 1)
     template.has_resource_properties("AWS::SNS::Subscription", {"Protocol": "lambda"})
+
+
+def test_query_api_lambda_env_and_layers():
+    template = _synth_template()
+
+    matches = template.find_resources(
+        "AWS::Lambda::Function",
+        {
+            "Properties": {
+                "Handler": "handler.handler",
+                "Environment": {
+                    "Variables": assertions.Match.exact(
+                        {"POSTINGS_TABLE_NAME": assertions.Match.any_value()}
+                    )
+                },
+            }
+        },
+    )
+    assert len(matches) == 1
+    (resource,) = matches.values()
+    assert len(resource["Properties"]["Layers"]) == 2
+
+
+def test_query_api_lambda_role_only_queries_table_and_gsi():
+    template = _synth_template()
+
+    template.has_resource_properties(
+        "AWS::IAM::Policy",
+        {
+            "PolicyDocument": {
+                "Statement": assertions.Match.array_with(
+                    [
+                        assertions.Match.object_like(
+                            {
+                                "Action": "dynamodb:Query",
+                                "Effect": "Allow",
+                                "Resource": assertions.Match.array_with(
+                                    [
+                                        assertions.Match.object_like(
+                                            {
+                                                "Fn::Join": assertions.Match.array_with(
+                                                    [
+                                                        assertions.Match.array_with(
+                                                            ["/index/*"]
+                                                        )
+                                                    ]
+                                                )
+                                            }
+                                        )
+                                    ]
+                                ),
+                            }
+                        )
+                    ]
+                )
+            }
+        },
+    )
+
+
+def test_query_api_requires_an_api_key():
+    template = _synth_template()
+
+    template.resource_count_is("AWS::ApiGateway::ApiKey", 1)
+    template.resource_count_is("AWS::ApiGateway::UsagePlan", 1)
+    template.resource_count_is("AWS::ApiGateway::UsagePlanKey", 1)
+
+    matches = template.find_resources("AWS::ApiGateway::Method", {"Properties": {"HttpMethod": "ANY"}})
+    assert len(matches) >= 1
+    assert all(m["Properties"]["ApiKeyRequired"] is True for m in matches.values())
