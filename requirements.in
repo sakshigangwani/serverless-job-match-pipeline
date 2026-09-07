@@ -3,6 +3,7 @@
 # (infra/ manages its own CDK-toolkit venv and requirements.txt separately)
 
 boto3
+pydantic
 scikit-learn
 xgboost
 shap
