@@ -426,23 +426,10 @@ def test_alerts_topic_exists_and_threshold_can_publish_to_it():
     template.resource_count_is("AWS::SNS::Topic", 1)
 
 
-def test_alert_email_lambda_has_no_layers_and_can_only_send_ses():
+def test_alert_email_lambda_can_only_send_ses():
+    # Layer count (CommonLayer only, for logging/metrics — PLAN.md Phase 9) is covered
+    # by test_alert_email_lambda_has_common_layer_for_logging_and_metrics.
     template = _synth_template()
-
-    matches = template.find_resources(
-        "AWS::Lambda::Function",
-        {
-            "Properties": {
-                "Handler": "handler.handler",
-                "Environment": {
-                    "Variables": {"SENDER_EMAIL": assertions.Match.any_value()}
-                },
-            }
-        },
-    )
-    assert len(matches) == 1
-    (resource,) = matches.values()
-    assert "Layers" not in resource["Properties"]
 
     template.has_resource_properties(
         "AWS::IAM::Policy",
@@ -538,3 +525,86 @@ def test_query_api_requires_an_api_key():
     matches = template.find_resources("AWS::ApiGateway::Method", {"Properties": {"HttpMethod": "ANY"}})
     assert len(matches) >= 1
     assert all(m["Properties"]["ApiKeyRequired"] is True for m in matches.values())
+
+
+def test_every_pipeline_lambda_has_active_xray_tracing():
+    template = _synth_template()
+
+    matches = template.find_resources(
+        "AWS::Lambda::Function", {"Properties": {"TracingConfig": {"Mode": "Active"}}}
+    )
+    # fetch, extract, embed, threshold, alert_email, query_api — not the two
+    # CDK-provided custom-resource handlers (S3 auto-delete, bucket notifications),
+    # which CDK doesn't enable tracing on.
+    assert len(matches) == 6
+
+
+def test_query_api_stage_has_xray_tracing_enabled():
+    template = _synth_template()
+
+    template.has_resource_properties("AWS::ApiGateway::Stage", {"TracingEnabled": True})
+
+
+def test_alert_email_lambda_has_common_layer_for_logging_and_metrics():
+    template = _synth_template()
+
+    matches = template.find_resources(
+        "AWS::Lambda::Function",
+        {
+            "Properties": {
+                "Environment": {
+                    "Variables": assertions.Match.object_like(
+                        {"SENDER_EMAIL": assertions.Match.any_value()}
+                    )
+                }
+            }
+        },
+    )
+    assert len(matches) == 1
+    (resource,) = matches.values()
+    assert len(resource["Properties"]["Layers"]) == 1
+
+
+def test_every_pipeline_lambda_has_an_error_rate_and_duration_alarm():
+    template = _synth_template()
+
+    template.resource_count_is("AWS::CloudWatch::Alarm", 12)  # 6 lambdas x 2 alarms each
+
+    error_rate_alarms = template.find_resources(
+        "AWS::CloudWatch::Alarm",
+        {
+            "Properties": {
+                "Metrics": assertions.Match.array_with(
+                    [
+                        assertions.Match.object_like(
+                            {"Expression": "(errors / invocations) * 100"}
+                        )
+                    ]
+                )
+            }
+        },
+    )
+    assert len(error_rate_alarms) == 6
+
+
+def test_error_rate_alarms_do_not_false_alarm_on_an_idle_lambda():
+    template = _synth_template()
+
+    template.has_resource_properties(
+        "AWS::CloudWatch::Alarm",
+        {
+            "Metrics": assertions.Match.array_with(
+                [assertions.Match.object_like({"Expression": "(errors / invocations) * 100"})]
+            ),
+            "TreatMissingData": "notBreaching",
+        },
+    )
+
+
+def test_pipeline_dashboard_exists():
+    template = _synth_template()
+
+    template.resource_count_is("AWS::CloudWatch::Dashboard", 1)
+    template.has_resource_properties(
+        "AWS::CloudWatch::Dashboard", {"DashboardName": "JobPulse-Pipeline"}
+    )

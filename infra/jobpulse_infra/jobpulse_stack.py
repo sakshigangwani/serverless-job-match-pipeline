@@ -13,6 +13,9 @@ from aws_cdk import (
     aws_apigateway as apigateway,
 )
 from aws_cdk import (
+    aws_cloudwatch as cloudwatch,
+)
+from aws_cdk import (
     aws_dynamodb as dynamodb,
 )
 from aws_cdk import (
@@ -264,6 +267,7 @@ class JobPulseStack(Stack):
             layers=[common_layer],
             timeout=Duration.seconds(30),
             memory_size=256,
+            tracing=_lambda.Tracing.ACTIVE,
             environment={
                 "RAW_BUCKET_NAME": raw_postings_bucket.bucket_name,
                 "JOB_SOURCE": "remoteok",
@@ -290,6 +294,7 @@ class JobPulseStack(Stack):
             layers=[common_layer, pydantic_layer],
             timeout=Duration.seconds(60),  # allows for the Bedrock call + one retry
             memory_size=512,
+            tracing=_lambda.Tracing.ACTIVE,
             environment={
                 "BEDROCK_MODEL_ID": DEFAULT_BEDROCK_MODEL_ID,
                 "POSTINGS_TABLE_NAME": postings_table.table_name,
@@ -338,6 +343,7 @@ class JobPulseStack(Stack):
             layers=[common_layer, pydantic_layer],
             timeout=Duration.seconds(60),
             memory_size=512,
+            tracing=_lambda.Tracing.ACTIVE,
             environment={
                 "BEDROCK_EMBEDDING_MODEL_ID": DEFAULT_BEDROCK_EMBEDDING_MODEL_ID,
                 "POSTINGS_TABLE_NAME": postings_table.table_name,
@@ -407,6 +413,7 @@ class JobPulseStack(Stack):
             layers=[common_layer, pydantic_layer],
             timeout=Duration.seconds(30),
             memory_size=256,
+            tracing=_lambda.Tracing.ACTIVE,
             environment={
                 "POSTINGS_TABLE_NAME": postings_table.table_name,
                 "ALERTS_TOPIC_ARN": alerts_topic.topic_arn,
@@ -454,7 +461,8 @@ class JobPulseStack(Stack):
         )
 
         # --- Alert email Lambda (PLAN.md Phase 7.2-3) ---
-        # No layers: pure stdlib + boto3 (SES), no common/pydantic dependency at all.
+        # CommonLayer only (not PydanticLayer): common.logging_utils/common.metrics
+        # (PLAN.md Phase 9) are pure stdlib, so no pydantic needed here.
         alert_email_lambda = _lambda.Function(
             self,
             "AlertEmailLambda",
@@ -462,8 +470,10 @@ class JobPulseStack(Stack):
             architecture=_lambda.Architecture.X86_64,
             handler="handler.handler",
             code=_lambda.Code.from_asset(str(LAMBDAS_DIR / "alert_email")),
+            layers=[common_layer],
             timeout=Duration.seconds(15),
             memory_size=128,
+            tracing=_lambda.Tracing.ACTIVE,
             environment={
                 "SENDER_EMAIL": self.node.try_get_context("senderEmail") or DEFAULT_SENDER_EMAIL,
                 "RECIPIENT_EMAIL": self.node.try_get_context("recipientEmail")
@@ -489,6 +499,7 @@ class JobPulseStack(Stack):
             layers=[common_layer, pydantic_layer],
             timeout=Duration.seconds(10),
             memory_size=256,
+            tracing=_lambda.Tracing.ACTIVE,
             environment={"POSTINGS_TABLE_NAME": postings_table.table_name},
         )
         # Read-only, and only the one action this Lambda actually calls — not
@@ -513,6 +524,7 @@ class JobPulseStack(Stack):
             handler=query_api_lambda,
             proxy=True,
             default_method_options=apigateway.MethodOptions(api_key_required=True),
+            deploy_options=apigateway.StageOptions(tracing_enabled=True),
         )
         query_api_key = query_api.add_api_key("QueryApiKey")
         usage_plan = query_api.add_usage_plan(
@@ -522,6 +534,111 @@ class JobPulseStack(Stack):
             ],
         )
         usage_plan.add_api_key(query_api_key)
+
+        # --- Alarms (PLAN.md Phase 9.2) ---
+        # Every core-pipeline Lambda gets the same two alarms: an error-rate alarm
+        # (errors as a percentage of invocations, not a raw count — a fixed count
+        # means something different for a Lambda invoked twice a day vs. one invoked
+        # constantly) and a duration alarm at 80% of that Lambda's own configured
+        # timeout (an early warning before it starts actually timing out). A DLQ-depth
+        # alarm is intentionally not here yet — there's no DLQ until Phase 12.
+        pipeline_lambdas = {
+            "Fetch": (fetch_lambda, fetch_lambda.timeout),
+            "Extract": (extract_lambda, extract_lambda.timeout),
+            "Embed": (embed_lambda, embed_lambda.timeout),
+            "Threshold": (threshold_lambda, threshold_lambda.timeout),
+            "AlertEmail": (alert_email_lambda, alert_email_lambda.timeout),
+            "QueryApi": (query_api_lambda, query_api_lambda.timeout),
+        }
+
+        def add_lambda_alarms(fn: _lambda.Function, id_prefix: str, timeout: Duration) -> None:
+            error_rate = cloudwatch.MathExpression(
+                expression="(errors / invocations) * 100",
+                using_metrics={
+                    "errors": fn.metric_errors(period=Duration.minutes(5)),
+                    "invocations": fn.metric_invocations(period=Duration.minutes(5)),
+                },
+                period=Duration.minutes(5),
+            )
+            cloudwatch.Alarm(
+                self,
+                f"{id_prefix}ErrorRateAlarm",
+                metric=error_rate,
+                threshold=10,  # percent
+                evaluation_periods=1,
+                # No invocations in a period means no error-rate data point at all
+                # (not zero) — treating that as non-breaching avoids false alarms on
+                # a Lambda that's simply been idle.
+                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+                alarm_description=f"{id_prefix} error rate above 10% over 5 minutes",
+            )
+            cloudwatch.Alarm(
+                self,
+                f"{id_prefix}DurationAlarm",
+                metric=fn.metric_duration(period=Duration.minutes(5), statistic="p99"),
+                threshold=timeout.to_milliseconds() * 0.8,
+                evaluation_periods=1,
+                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+                alarm_description=f"{id_prefix} p99 duration above 80% of its {timeout.to_seconds()}s timeout",
+            )
+
+        for id_prefix, (fn, timeout) in pipeline_lambdas.items():
+            add_lambda_alarms(fn, id_prefix, timeout)
+
+        # --- Dashboard (PLAN.md Phase 9.4) ---
+        dashboard = cloudwatch.Dashboard(self, "PipelineDashboard", dashboard_name="JobPulse-Pipeline")
+        dashboard.add_widgets(
+            cloudwatch.GraphWidget(
+                title="Lambda Invocations",
+                left=[fn.metric_invocations() for fn, _ in pipeline_lambdas.values()],
+            ),
+            cloudwatch.GraphWidget(
+                title="Lambda Errors",
+                left=[fn.metric_errors() for fn, _ in pipeline_lambdas.values()],
+            ),
+        )
+        dashboard.add_widgets(
+            cloudwatch.GraphWidget(
+                title="Lambda Duration (p99)",
+                left=[fn.metric_duration(statistic="p99") for fn, _ in pipeline_lambdas.values()],
+            ),
+            cloudwatch.GraphWidget(
+                title="DynamoDB Capacity + Throttles",
+                left=[
+                    postings_table.metric_consumed_read_capacity_units(),
+                    postings_table.metric_consumed_write_capacity_units(),
+                ],
+                right=[
+                    postings_table.metric_throttled_requests_for_operations(
+                        operations=[
+                            dynamodb.Operation.PUT_ITEM,
+                            dynamodb.Operation.UPDATE_ITEM,
+                            dynamodb.Operation.QUERY,
+                        ]
+                    )
+                ],
+            ),
+        )
+        # Custom EMF metrics emitted by common/metrics.py (PLAN.md Phase 9.2's named
+        # examples: postings ingested, extraction failures, average score, alerts sent).
+        dashboard.add_widgets(
+            cloudwatch.GraphWidget(
+                title="Postings Ingested",
+                left=[cloudwatch.Metric(namespace="JobPulse", metric_name="PostingsIngested", statistic="Sum")],
+            ),
+            cloudwatch.GraphWidget(
+                title="Extraction Failures",
+                left=[cloudwatch.Metric(namespace="JobPulse", metric_name="ExtractionFailures", statistic="Sum")],
+            ),
+            cloudwatch.GraphWidget(
+                title="Average Posting Score",
+                left=[cloudwatch.Metric(namespace="JobPulse", metric_name="PostingScore", statistic="Average")],
+            ),
+            cloudwatch.GraphWidget(
+                title="Alerts Sent",
+                left=[cloudwatch.Metric(namespace="JobPulse", metric_name="AlertsSent", statistic="Sum")],
+            ),
+        )
 
         self.raw_postings_bucket = raw_postings_bucket
         self.postings_table = postings_table

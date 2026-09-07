@@ -12,7 +12,6 @@ it, this can't re-trigger itself.
 from __future__ import annotations
 
 import json
-import logging
 import os
 from decimal import Decimal
 from pathlib import Path
@@ -21,6 +20,8 @@ import boto3
 from boto3.dynamodb.types import TypeDeserializer
 
 from common.dynamodb import from_dynamodb_item
+from common.logging_utils import get_logger, log_event
+from common.metrics import emit_metric
 from common.models import DEFAULT_CANDIDATE_PROFILE_PATH, CandidateProfile
 from ml.features import build_feature_vector
 
@@ -32,8 +33,7 @@ except ImportError:
     # sibling module there, not part of a "lambdas.threshold" package.
     from reranker import load_model, predict_proba  # type: ignore[no-redef]
 
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
+logger = get_logger(__name__)
 
 DEFAULT_MODEL_PATH = Path(__file__).resolve().parent / "model.json"
 DEFAULT_FIT_THRESHOLD = 0.7
@@ -84,6 +84,9 @@ def _process_record(table, sns, topic_arn: str, candidate: CandidateProfile, fit
             ":alert_sent": alert_sent,
         },
     )
+    log_event(logger, "scored posting", posting_id=posting.posting_id, score=score, alert_sent=alert_sent)
+    emit_metric("PostingScore", score)
+    emit_metric("AlertsSent", 1 if alert_sent else 0)
     return {"posting_id": posting.posting_id, "score": score, "alert_sent": alert_sent}
 
 
@@ -108,5 +111,5 @@ def handler(event, context):
         processed.append(_process_record(table, sns, topic_arn, candidate, fit_threshold, record))
 
     result = {"processed": len(processed), "results": processed}
-    logger.info(json.dumps(result))
+    log_event(logger, "threshold batch complete", processed=len(processed))
     return result

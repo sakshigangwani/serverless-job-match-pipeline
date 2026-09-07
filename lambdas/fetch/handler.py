@@ -5,12 +5,13 @@ an EventBridge rule (see infra/jobpulse_infra/jobpulse_stack.py).
 from __future__ import annotations
 
 import json
-import logging
 import os
 from datetime import datetime, timezone
 
 import boto3
 
+from common.logging_utils import get_logger, log_event
+from common.metrics import emit_metric
 from common.storage_keys import compute_posting_hash, raw_posting_key
 
 try:
@@ -21,8 +22,7 @@ except ImportError:
     # sibling module there, not part of a "lambdas.fetch" package.
     from sources import JobSource, RemoteOKSource  # type: ignore[no-redef]
 
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
+logger = get_logger(__name__)
 
 SOURCES: dict[str, JobSource] = {
     "remoteok": RemoteOKSource(),
@@ -60,7 +60,9 @@ def handler(event, context):
             ContentType="application/json",
         )
         written += 1
+        log_event(logger, "wrote raw posting", posting_id=posting_hash, source=posting.source, key=key)
 
     result = {"source": source_name, "fetched": len(postings), "written": written}
-    logger.info(json.dumps(result))
+    log_event(logger, "fetch complete", **result)
+    emit_metric("PostingsIngested", written, dimensions={"Source": source_name})
     return result

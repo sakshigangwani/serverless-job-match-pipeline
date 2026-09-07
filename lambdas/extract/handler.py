@@ -6,7 +6,6 @@ structured record to DynamoDB.
 from __future__ import annotations
 
 import json
-import logging
 import os
 import urllib.parse
 from datetime import datetime
@@ -15,6 +14,8 @@ import boto3
 from pydantic import ValidationError
 
 from common.dynamodb import to_dynamodb_item
+from common.logging_utils import get_logger, log_event
+from common.metrics import emit_metric
 from common.models import Posting
 
 try:
@@ -35,8 +36,7 @@ except ImportError:
     )
     from prompts import build_extraction_prompt  # type: ignore[no-redef]
 
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
+logger = get_logger(__name__)
 
 MAX_ATTEMPTS = 2
 
@@ -45,6 +45,7 @@ def _extract_posting(bedrock_runtime, model_id: str, raw: dict) -> Posting:
     """Call the LLM and validate its output, retrying once on bad JSON or a schema
     violation (e.g. an out-of-range comp value) before giving up.
     """
+    posting_id = raw["posting_hash"]
     prompt = build_extraction_prompt(raw["title"], raw["description_text"])
     last_error: Exception | None = None
 
@@ -53,10 +54,10 @@ def _extract_posting(bedrock_runtime, model_id: str, raw: dict) -> Posting:
             text = invoke_claude(bedrock_runtime, model_id, prompt)
             fields = parse_llm_json(text)
             return Posting(
-                posting_id=raw["posting_hash"],
+                posting_id=posting_id,
                 source=raw["source"],
                 source_url=raw["source_url"],
-                posting_hash=raw["posting_hash"],
+                posting_hash=posting_id,
                 ingested_at=datetime.fromisoformat(raw["ingested_at"]),
                 description_text=raw["description_text"],
                 title=fields.get("title") or raw.get("title"),
@@ -70,13 +71,16 @@ def _extract_posting(bedrock_runtime, model_id: str, raw: dict) -> Posting:
             )
         except (ExtractionError, ValidationError) as exc:
             last_error = exc
-            logger.warning("extraction attempt %s failed: %s", attempt, exc)
+            log_event(
+                logger, "extraction attempt failed", posting_id=posting_id, attempt=attempt, error=str(exc)
+            )
             prompt = (
                 build_extraction_prompt(raw["title"], raw["description_text"])
                 + f"\n\nYour previous response was invalid: {exc}\n"
                 + "Return ONLY a corrected JSON object, with no extra text or markdown."
             )
 
+    emit_metric("ExtractionFailures", 1)
     raise ExtractionError(f"extraction failed after {MAX_ATTEMPTS} attempts: {last_error}")
 
 
@@ -85,6 +89,7 @@ def _process_record(s3, bedrock_runtime, table, model_id: str, bucket: str, key:
     posting = _extract_posting(bedrock_runtime, model_id, raw)
 
     table.put_item(Item=to_dynamodb_item(posting))
+    log_event(logger, "extracted and stored posting", posting_id=posting.posting_id)
     return posting.posting_id
 
 
@@ -103,5 +108,5 @@ def handler(event, context):
         written.append(_process_record(s3, bedrock_runtime, table, model_id, bucket, key))
 
     result = {"processed": len(written), "posting_ids": written}
-    logger.info(json.dumps(result))
+    log_event(logger, "extraction batch complete", **result)
     return result

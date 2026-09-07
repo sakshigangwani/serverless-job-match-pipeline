@@ -150,13 +150,27 @@ CloudWatch (Logs/Metrics/Alarms) + X-Ray · SQS (DLQ) · SHAP.
 ## Phase 9 — Observability
 
 1. Add **CloudWatch** log groups (automatic per Lambda), structured JSON logging in every
-   Lambda (correlation id per posting).
-2. Add **CloudWatch Metrics** (custom metrics: postings ingested, extraction failures,
-   average score, alerts sent) and **CloudWatch Alarms** (error rate, DLQ depth once
-   Phase 12 exists, Lambda duration/cold-start).
-3. Enable **X-Ray** tracing on all Lambdas and API Gateway for latency breakdown across the
-   pipeline (fetch → extract → embed → score → alert).
-4. Build a CloudWatch dashboard (via CDK) summarizing pipeline health.
+   Lambda (`common/logging_utils.py`; `posting_id` correlation id on every log line that
+   has one — fetch logs per-item as it writes, since one invocation handles a batch).
+2. Add **CloudWatch Metrics** (`common/metrics.py`, hand-rolled CloudWatch Embedded
+   Metric Format rather than the `aws-embedded-metrics` package or `PutMetricData` calls
+   — printing the right JSON shape to stdout is enough, no extra dependency or IAM
+   permission needed): postings ingested, extraction failures, average score (CloudWatch's
+   own Average statistic over many emitted per-posting values, not computed here), alerts
+   sent. **CloudWatch Alarms**: error rate (as a percentage of invocations, not a raw
+   count) and p99 duration (vs. 80% of each Lambda's own timeout) per core-pipeline
+   Lambda. DLQ depth is intentionally not alarmed on yet — added in Phase 12 once the
+   queue exists.
+3. Enable **X-Ray** tracing on all Lambdas and the API Gateway stage. This gives each
+   Lambda invocation and the AWS SDK calls it makes their own trace segments — it does
+   **not** automatically link separate async invocations (an S3 event, a DynamoDB Stream
+   event) into one true end-to-end trace across fetch → extract → embed → score → alert;
+   that would require manually propagating a trace/correlation id through each event
+   payload, which is what `posting_id` in the structured logs (point 1) does instead for
+   cross-stage correlation.
+4. Build a CloudWatch dashboard (via CDK) summarizing pipeline health: per-Lambda
+   invocations/errors/p99 duration, DynamoDB capacity + throttles, and the custom metrics
+   from point 2.
 
 ## Phase 10 — CI/CD
 
