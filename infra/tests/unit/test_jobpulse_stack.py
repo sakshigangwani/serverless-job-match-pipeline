@@ -533,10 +533,10 @@ def test_every_pipeline_lambda_has_active_xray_tracing():
     matches = template.find_resources(
         "AWS::Lambda::Function", {"Properties": {"TracingConfig": {"Mode": "Active"}}}
     )
-    # fetch, extract, embed, threshold, alert_email, query_api — not the two
-    # CDK-provided custom-resource handlers (S3 auto-delete, bucket notifications),
+    # fetch, extract, embed, threshold, alert_email, query_api, dlq_redrive — not the
+    # two CDK-provided custom-resource handlers (S3 auto-delete, bucket notifications),
     # which CDK doesn't enable tracing on.
-    assert len(matches) == 6
+    assert len(matches) == 7
 
 
 def test_query_api_stage_has_xray_tracing_enabled():
@@ -568,7 +568,8 @@ def test_alert_email_lambda_has_common_layer_for_logging_and_metrics():
 def test_every_pipeline_lambda_has_an_error_rate_and_duration_alarm():
     template = _synth_template()
 
-    template.resource_count_is("AWS::CloudWatch::Alarm", 12)  # 6 lambdas x 2 alarms each
+    # 6 lambdas x 2 alarms each, plus 2 DLQ depth alarms (PLAN.md Phase 12.3).
+    template.resource_count_is("AWS::CloudWatch::Alarm", 14)
 
     error_rate_alarms = template.find_resources(
         "AWS::CloudWatch::Alarm",
@@ -608,3 +609,70 @@ def test_pipeline_dashboard_exists():
     template.has_resource_properties(
         "AWS::CloudWatch::Dashboard", {"DashboardName": "JobPulse-Pipeline"}
     )
+
+
+def test_extract_lambda_has_an_async_dlq_with_retry_and_max_event_age():
+    template = _synth_template()
+
+    template.resource_count_is("AWS::SQS::Queue", 2)
+    template.has_resource_properties(
+        "AWS::Lambda::EventInvokeConfig",
+        {
+            "MaximumRetryAttempts": 2,
+            "MaximumEventAgeInSeconds": 7200,
+            "DestinationConfig": {"OnFailure": {"Destination": assertions.Match.any_value()}},
+        },
+    )
+
+
+def test_embed_event_source_mapping_has_a_dlq_destination():
+    template = _synth_template()
+
+    template.has_resource_properties(
+        "AWS::Lambda::EventSourceMapping",
+        {
+            "DestinationConfig": {"OnFailure": {"Destination": assertions.Match.any_value()}},
+            # Still the same INSERT-only filter from Phase 5 — a DLQ destination
+            # doesn't change what triggers this Lambda, only what happens on failure.
+            "FilterCriteria": {"Filters": [{"Pattern": '{"eventName":["INSERT"]}'}]},
+        },
+    )
+
+
+def test_dlq_redrive_lambda_can_consume_both_dlqs_invoke_both_lambdas_and_scan_the_table():
+    template = _synth_template()
+
+    template.has_resource_properties(
+        "AWS::IAM::Policy",
+        {
+            "PolicyDocument": {
+                "Statement": assertions.Match.array_with(
+                    [
+                        assertions.Match.object_like(
+                            {"Action": assertions.Match.array_with(["sqs:DeleteMessage"])}
+                        ),
+                        assertions.Match.object_like({"Action": "lambda:InvokeFunction"}),
+                        assertions.Match.object_like(
+                            {"Action": "dynamodb:Scan", "Effect": "Allow"}
+                        ),
+                    ]
+                )
+            }
+        },
+    )
+
+
+def test_dlq_depth_alarms_fire_on_any_message_not_a_percentage():
+    template = _synth_template()
+
+    matches = template.find_resources(
+        "AWS::CloudWatch::Alarm",
+        {
+            "Properties": {
+                "MetricName": "ApproximateNumberOfMessagesVisible",
+                "Threshold": 1,
+                "TreatMissingData": "notBreaching",
+            }
+        },
+    )
+    assert len(matches) == 2
