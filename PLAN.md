@@ -79,8 +79,13 @@ CloudWatch (Logs/Metrics/Alarms) + X-Ray · SQS (DLQ) · SHAP.
 
 1. Create the **DynamoDB** table in CDK with the schema from Phase 1, plus a GSI for
    querying top-scored postings.
-2. Extraction + embedding Lambdas write structured records, embeddings (as compact
-   base64/float arrays), and a placeholder score into DynamoDB.
+2. Extraction writes the structured record (DynamoDB `PutItem`, replacing Phase 3's
+   interim S3 write); embedding merges in the packed embedding vector (compact
+   float32/Binary, not base64 text) and the embedding-similarity baseline (DynamoDB
+   `UpdateItem`, replacing Phase 4's interim S3 write). `score` is left unset until
+   Phase 7 — DynamoDB simply excludes an item from the `ScoreIndex` GSI until it has one,
+   so unscored postings don't show up in ranked queries yet, which is the correct
+   "not ready to rank" behavior rather than a placeholder value.
 
 ## Phase 6 — Match-scoring model (offline ML, the rigor component)
 

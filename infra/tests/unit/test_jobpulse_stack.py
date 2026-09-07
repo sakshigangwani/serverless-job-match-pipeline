@@ -116,7 +116,7 @@ def test_extract_lambda_has_both_layers_and_bedrock_model_env():
     assert len(resource["Properties"]["Layers"]) == 2
 
 
-def test_extract_lambda_role_scoped_to_raw_and_structured_prefixes_only():
+def test_extract_lambda_role_reads_raw_and_only_puts_new_dynamodb_items():
     template = _synth_template()
 
     template.has_resource_properties(
@@ -129,7 +129,7 @@ def test_extract_lambda_role_scoped_to_raw_and_structured_prefixes_only():
                             {"Action": "s3:GetObject", "Effect": "Allow"}
                         ),
                         assertions.Match.object_like(
-                            {"Action": "s3:PutObject", "Effect": "Allow"}
+                            {"Action": "dynamodb:PutItem", "Effect": "Allow"}
                         ),
                     ]
                 )
@@ -226,7 +226,7 @@ def test_embed_lambda_has_both_layers_and_embedding_model_env():
     assert len(resource["Properties"]["Layers"]) == 2
 
 
-def test_embed_lambda_role_scoped_to_structured_embeddings_and_candidate_prefixes():
+def test_embed_lambda_role_scoped_to_candidate_prefix_and_only_updates_dynamodb():
     template = _synth_template()
 
     template.has_resource_properties(
@@ -235,40 +235,6 @@ def test_embed_lambda_role_scoped_to_structured_embeddings_and_candidate_prefixe
             "PolicyDocument": {
                 "Statement": assertions.Match.array_with(
                     [
-                        assertions.Match.object_like(
-                            {
-                                "Action": "s3:GetObject",
-                                "Effect": "Allow",
-                                "Resource": assertions.Match.object_like(
-                                    {
-                                        "Fn::Join": assertions.Match.array_with(
-                                            [
-                                                assertions.Match.array_with(
-                                                    ["/structured/*"]
-                                                )
-                                            ]
-                                        )
-                                    }
-                                ),
-                            }
-                        ),
-                        assertions.Match.object_like(
-                            {
-                                "Action": "s3:PutObject",
-                                "Effect": "Allow",
-                                "Resource": assertions.Match.object_like(
-                                    {
-                                        "Fn::Join": assertions.Match.array_with(
-                                            [
-                                                assertions.Match.array_with(
-                                                    ["/embeddings/*"]
-                                                )
-                                            ]
-                                        )
-                                    }
-                                ),
-                            }
-                        ),
                         assertions.Match.object_like(
                             {
                                 "Action": ["s3:GetObject", "s3:PutObject"],
@@ -285,6 +251,9 @@ def test_embed_lambda_role_scoped_to_structured_embeddings_and_candidate_prefixe
                                     }
                                 ),
                             }
+                        ),
+                        assertions.Match.object_like(
+                            {"Action": "dynamodb:UpdateItem", "Effect": "Allow"}
                         ),
                     ]
                 )
@@ -328,31 +297,59 @@ def test_embed_lambda_role_can_invoke_only_titan_embedding_models():
     )
 
 
-def test_raw_postings_bucket_notifies_embed_lambda_on_new_structured_objects():
+def test_postings_table_has_score_ranked_gsi_and_streams_enabled():
     template = _synth_template()
 
     template.has_resource_properties(
-        "Custom::S3BucketNotifications",
+        "AWS::DynamoDB::Table",
         {
-            "NotificationConfiguration": {
-                "LambdaFunctionConfigurations": assertions.Match.array_with(
-                    [
-                        assertions.Match.object_like(
-                            {
-                                "Filter": {
-                                    "Key": {
-                                        "FilterRules": assertions.Match.array_with(
-                                            [
-                                                {"Name": "suffix", "Value": ".json"},
-                                                {"Name": "prefix", "Value": "structured/"},
-                                            ]
-                                        )
-                                    }
-                                }
-                            }
-                        )
-                    ]
-                )
-            }
+            "BillingMode": "PAY_PER_REQUEST",
+            "KeySchema": [{"AttributeName": "posting_id", "KeyType": "HASH"}],
+            "StreamSpecification": {"StreamViewType": "NEW_IMAGE"},
+            "GlobalSecondaryIndexes": assertions.Match.array_with(
+                [
+                    assertions.Match.object_like(
+                        {
+                            "IndexName": "ScoreIndex",
+                            "KeySchema": [
+                                {"AttributeName": "gsi_pk", "KeyType": "HASH"},
+                                {"AttributeName": "score", "KeyType": "RANGE"},
+                            ],
+                        }
+                    )
+                ]
+            ),
         },
     )
+
+
+def test_embed_lambda_dynamodb_stream_trigger_is_filtered_to_insert_only():
+    template = _synth_template()
+
+    template.has_resource_properties(
+        "AWS::Lambda::EventSourceMapping",
+        {
+            "StartingPosition": "LATEST",
+            "FilterCriteria": {
+                "Filters": [{"Pattern": '{"eventName":["INSERT"]}'}]
+            },
+        },
+    )
+
+
+def test_only_the_raw_prefix_notification_remains_on_the_bucket():
+    template = _synth_template()
+
+    matches = template.find_resources("Custom::S3BucketNotifications")
+    (notification,) = matches.values()
+    configs = notification["Properties"]["NotificationConfiguration"][
+        "LambdaFunctionConfigurations"
+    ]
+
+    assert len(configs) == 1
+    prefixes = {
+        rule["Value"]
+        for rule in configs[0]["Filter"]["Key"]["FilterRules"]
+        if rule["Name"] == "prefix"
+    }
+    assert prefixes == {"raw/"}

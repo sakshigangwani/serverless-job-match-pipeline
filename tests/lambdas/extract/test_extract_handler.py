@@ -6,6 +6,7 @@ import boto3
 import pytest
 from moto import mock_aws
 
+from common.dynamodb import PARTITION_KEY, TABLE_NAME
 from lambdas.extract.handler import handler
 
 BUCKET = "jobpulse-raw-postings-test"
@@ -46,10 +47,11 @@ def _s3_event(bucket: str, key: str) -> dict:
 
 
 @contextmanager
-def _mocked_aws_with_bedrock(bedrock_runtime_mock):
-    """Real (moto-backed) S3 client, but a fully controlled bedrock-runtime mock —
+def _mocked_aws_with_bedrock(bedrock_runtime_mock, monkeypatch):
+    """Real (moto-backed) S3 + DynamoDB, but a fully controlled bedrock-runtime mock —
     moto's AWS coverage doesn't need to include Bedrock for these tests.
     """
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
     original_client = boto3.client
 
     def fake_client(service_name, *args, **kwargs):
@@ -61,8 +63,19 @@ def _mocked_aws_with_bedrock(bedrock_runtime_mock):
         s3 = original_client("s3", region_name="us-east-1")
         s3.create_bucket(Bucket=BUCKET)
         s3.put_object(Bucket=BUCKET, Key=RAW_KEY, Body=json.dumps(RAW_ENVELOPE))
+
+        dynamodb = boto3.resource("dynamodb", region_name="us-east-1")
+        dynamodb.create_table(
+            TableName=TABLE_NAME,
+            KeySchema=[{"AttributeName": PARTITION_KEY, "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": PARTITION_KEY, "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        monkeypatch.setenv("POSTINGS_TABLE_NAME", TABLE_NAME)
+        table = dynamodb.Table(TABLE_NAME)
+
         with patch("boto3.client", side_effect=fake_client):
-            yield s3
+            yield table
 
 
 def test_handler_writes_structured_posting_on_first_valid_response(monkeypatch):
@@ -70,21 +83,21 @@ def test_handler_writes_structured_posting_on_first_valid_response(monkeypatch):
     bedrock = MagicMock()
     bedrock.invoke_model.return_value = _bedrock_text_response(json.dumps(VALID_EXTRACTION))
 
-    with _mocked_aws_with_bedrock(bedrock) as s3:
+    with _mocked_aws_with_bedrock(bedrock, monkeypatch) as table:
         result = handler(_s3_event(BUCKET, RAW_KEY), None)
 
         assert result["processed"] == 1
         assert bedrock.invoke_model.call_count == 1
+        assert result["posting_ids"] == ["deadbeef"]
 
-        out_key = result["written_keys"][0]
-        assert out_key == "structured/remoteok/2026-09-06/deadbeef.json"
-
-        body = json.loads(s3.get_object(Bucket=BUCKET, Key=out_key)["Body"].read())
-        assert body["posting_id"] == "deadbeef"
-        assert body["company"] == "Acme Corp"
-        assert body["comp_min"] == 120000
-        assert body["remote_status"] == "remote"
-        assert body["required_skills"] == ["Python", "AWS"]
+        item = table.get_item(Key={"posting_id": "deadbeef"})["Item"]
+        assert item["posting_id"] == "deadbeef"
+        assert item["company"] == "Acme Corp"
+        assert item["comp_min"] == 120000
+        assert item["remote_status"] == "remote"
+        assert item["required_skills"] == ["Python", "AWS"]
+        assert item["gsi_pk"] == "POSTING"
+        assert item["score"] is None
 
 
 def test_handler_retries_once_on_malformed_json_then_succeeds(monkeypatch):
@@ -95,15 +108,14 @@ def test_handler_retries_once_on_malformed_json_then_succeeds(monkeypatch):
         _bedrock_text_response(json.dumps(VALID_EXTRACTION)),
     ]
 
-    with _mocked_aws_with_bedrock(bedrock) as s3:
+    with _mocked_aws_with_bedrock(bedrock, monkeypatch) as table:
         result = handler(_s3_event(BUCKET, RAW_KEY), None)
 
         assert bedrock.invoke_model.call_count == 2
         assert result["processed"] == 1
 
-        out_key = result["written_keys"][0]
-        body = json.loads(s3.get_object(Bucket=BUCKET, Key=out_key)["Body"].read())
-        assert body["company"] == "Acme Corp"
+        item = table.get_item(Key={"posting_id": "deadbeef"})["Item"]
+        assert item["company"] == "Acme Corp"
 
 
 def test_handler_retries_once_on_schema_violation_then_succeeds(monkeypatch):
@@ -115,7 +127,7 @@ def test_handler_retries_once_on_schema_violation_then_succeeds(monkeypatch):
         _bedrock_text_response(json.dumps(VALID_EXTRACTION)),
     ]
 
-    with _mocked_aws_with_bedrock(bedrock):
+    with _mocked_aws_with_bedrock(bedrock, monkeypatch):
         result = handler(_s3_event(BUCKET, RAW_KEY), None)
 
     assert bedrock.invoke_model.call_count == 2
@@ -127,7 +139,7 @@ def test_handler_raises_after_exhausting_retries_on_persistent_bad_json(monkeypa
     bedrock = MagicMock()
     bedrock.invoke_model.return_value = _bedrock_text_response("still not json")
 
-    with _mocked_aws_with_bedrock(bedrock), pytest.raises(
+    with _mocked_aws_with_bedrock(bedrock, monkeypatch), pytest.raises(
         Exception, match="extraction failed after 2 attempts"
     ):
         handler(_s3_event(BUCKET, RAW_KEY), None)

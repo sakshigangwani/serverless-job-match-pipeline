@@ -3,9 +3,7 @@ from datetime import date
 from common.storage_keys import (
     CANDIDATE_EMBEDDINGS_KEY,
     compute_posting_hash,
-    posting_embedding_key,
     raw_posting_key,
-    structured_posting_key,
 )
 
 
@@ -40,37 +38,6 @@ def test_raw_posting_key_convention_with_string_date():
     key = raw_posting_key("adzuna", "2026-09-06", "deadbeef")
 
     assert key == "raw/adzuna/2026-09-06/deadbeef.json"
-
-
-def test_structured_posting_key_convention_with_date_object():
-    key = structured_posting_key("remoteok", date(2026, 9, 6), "deadbeef")
-
-    assert key == "structured/remoteok/2026-09-06/deadbeef.json"
-
-
-def test_structured_posting_key_uses_a_different_prefix_than_raw():
-    raw_key = raw_posting_key("remoteok", date(2026, 9, 6), "deadbeef")
-    structured_key = structured_posting_key("remoteok", date(2026, 9, 6), "deadbeef")
-
-    assert raw_key != structured_key
-    assert raw_key.startswith("raw/")
-    assert structured_key.startswith("structured/")
-
-
-def test_posting_embedding_key_convention():
-    key = posting_embedding_key("remoteok", date(2026, 9, 6), "deadbeef")
-
-    assert key == "embeddings/remoteok/2026-09-06/deadbeef.json"
-
-
-def test_posting_embedding_key_uses_its_own_prefix():
-    keys = {
-        raw_posting_key("remoteok", date(2026, 9, 6), "deadbeef"),
-        structured_posting_key("remoteok", date(2026, 9, 6), "deadbeef"),
-        posting_embedding_key("remoteok", date(2026, 9, 6), "deadbeef"),
-    }
-
-    assert len(keys) == 3
 
 
 def test_candidate_embeddings_key_is_a_fixed_singleton_location():

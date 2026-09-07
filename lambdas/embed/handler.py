@@ -1,23 +1,29 @@
-"""Embedding Lambda (PLAN.md Phase 4): triggered by S3 ObjectCreated events under
-structured/, embeds each posting's description text and the candidate profile (once,
-cached) with Bedrock Titan Embeddings, and writes the posting's embedding vector plus a
-cosine-similarity baseline to S3 under embeddings/.
+"""Embedding Lambda (PLAN.md Phase 4, trigger + persistence updated in Phase 5):
+triggered by a DynamoDB Streams INSERT event on the postings table (the CDK event source
+is filtered to INSERT only — see infra/jobpulse_infra/jobpulse_stack.py), embeds each
+new posting's description text and the candidate profile (once, cached in S3), and
+merges the posting's packed embedding vector plus a cosine-similarity baseline into the
+same DynamoDB item via update_item.
 
-Writes only to embeddings/ — never back to the structured/ key that triggered this
-Lambda — so this notification can never re-trigger itself.
+update_item (not put_item) produces a MODIFY stream record, not an INSERT one, so this
+can never re-trigger itself even without the INSERT-only filter — belt and suspenders,
+the same one-directional-flow principle used for the raw/ vs. structured/ split when
+this Lambda was S3-triggered.
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
-import urllib.parse
+from decimal import Decimal
 
 import boto3
+from boto3.dynamodb.types import TypeDeserializer
 
-from common.models import DEFAULT_CANDIDATE_PROFILE_PATH, CandidateProfile, Posting
+from common.dynamodb import from_dynamodb_item, pack_embedding
+from common.models import DEFAULT_CANDIDATE_PROFILE_PATH, CandidateProfile
 from common.similarity import cosine_similarity
-from common.storage_keys import CANDIDATE_EMBEDDINGS_KEY, posting_embedding_key
+from common.storage_keys import CANDIDATE_EMBEDDINGS_KEY
 
 try:
     # Local/package-style import, used by pytest (lambdas.embed.handler).
@@ -29,6 +35,8 @@ except ImportError:
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
+
+_deserializer = TypeDeserializer()
 
 
 def _get_or_load_candidate_embeddings(
@@ -64,50 +72,52 @@ def _get_or_load_candidate_embeddings(
         return payload
 
 
-def _process_record(
-    s3, bedrock_runtime, model_id: str, bucket: str, key: str, profile_path: str
-) -> str:
-    posting = Posting.model_validate_json(s3.get_object(Bucket=bucket, Key=key)["Body"].read())
+def _process_record(s3, bedrock_runtime, table, model_id: str, bucket: str, stream_record: dict, profile_path: str) -> str:
+    new_image = {
+        k: _deserializer.deserialize(v) for k, v in stream_record["dynamodb"]["NewImage"].items()
+    }
+    posting = from_dynamodb_item(new_image)
+
     candidate_embeddings = _get_or_load_candidate_embeddings(
         s3, bedrock_runtime, model_id, bucket, profile_path
     )
-
     posting_embedding = embed_text(bedrock_runtime, model_id, posting.description_text)
 
     resume_vector = candidate_embeddings["sections"].get("resume")
     similarity = cosine_similarity(posting_embedding, resume_vector) if resume_vector else None
 
-    out_key = posting_embedding_key(posting.source, posting.ingested_at.date(), posting.posting_hash)
-    s3.put_object(
-        Bucket=bucket,
-        Key=out_key,
-        Body=json.dumps(
-            {
-                "posting_id": posting.posting_id,
-                "candidate_id": candidate_embeddings["candidate_id"],
-                "model_id": model_id,
-                "embedding": posting_embedding,
-                "embedding_similarity": similarity,
-            }
-        ).encode("utf-8"),
-        ContentType="application/json",
+    table.update_item(
+        Key={"posting_id": posting.posting_id},
+        UpdateExpression="SET embedding = :embedding, embedding_similarity = :similarity",
+        ExpressionAttributeValues={
+            ":embedding": pack_embedding(posting_embedding),
+            # boto3's Table resource requires Decimal, not float, for DynamoDB Numbers
+            # (common.dynamodb.to_dynamodb_item does the same conversion for `score`).
+            ":similarity": Decimal(str(similarity)) if similarity is not None else None,
+        },
     )
-    return out_key
+    return posting.posting_id
 
 
 def handler(event, context):
     model_id = os.environ["BEDROCK_EMBEDDING_MODEL_ID"]
+    table_name = os.environ["POSTINGS_TABLE_NAME"]
+    bucket = os.environ["RAW_BUCKET_NAME"]
     profile_path = os.environ.get("CANDIDATE_PROFILE_PATH", str(DEFAULT_CANDIDATE_PROFILE_PATH))
 
     s3 = boto3.client("s3")
     bedrock_runtime = boto3.client("bedrock-runtime")
+    table = boto3.resource("dynamodb").Table(table_name)
 
-    written = []
+    updated = []
     for record in event.get("Records", []):
-        bucket = record["s3"]["bucket"]["name"]
-        key = urllib.parse.unquote_plus(record["s3"]["object"]["key"])
-        written.append(_process_record(s3, bedrock_runtime, model_id, bucket, key, profile_path))
+        if record.get("eventName") != "INSERT":
+            # Defense in depth: the CDK event source is already filtered to INSERT only
+            # (see jobpulse_stack.py), so this Lambda's own update_item calls (which
+            # produce MODIFY records) never reach here in production.
+            continue
+        updated.append(_process_record(s3, bedrock_runtime, table, model_id, bucket, record, profile_path))
 
-    result = {"processed": len(written), "written_keys": written}
+    result = {"processed": len(updated), "posting_ids": updated}
     logger.info(json.dumps(result))
     return result
