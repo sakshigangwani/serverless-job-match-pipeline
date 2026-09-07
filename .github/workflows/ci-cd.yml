@@ -1,0 +1,167 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  # Matches the Lambda runtime (infra/jobpulse_infra/jobpulse_stack.py), not this
+  # machine's local dev Python (3.13) — CI is where "does this actually work on the
+  # runtime we deploy to" gets checked.
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "20"
+
+jobs:
+  test:
+    name: Lint, type-check, and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install root dependencies (lambdas/ + ml/)
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Type-check (mypy)
+        # Scoped to common/, lambdas/, ml/ — not infra/, whose CDK constructs are
+        # heavily dynamic/jsii-typed; see pyproject.toml's [tool.mypy] comment.
+        run: mypy common lambdas ml
+
+      - name: Test common/, lambdas/, and ml/
+        # Includes tests/ml/test_metrics_floor.py: trains + evaluates the re-ranker
+        # against the committed synthetic dataset and asserts its metrics haven't
+        # regressed below a floor — PLAN.md Phase 10.1's "run the ML evaluation
+        # script... assert metrics don't regress" as an ordinary test, not a separate
+        # bespoke CI script.
+        run: pytest tests/ -v
+
+      - name: Train the re-ranker
+        # infra's own tests (and cdk synth) need ml/artifacts/reranker_inference.json
+        # to exist, the same "train before deploy" precondition documented in
+        # SETUP.md for a real deploy — training against the committed dataset here is
+        # what makes that precondition enforced by CI, not just written down.
+        run: python -m ml.train
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install infra dependencies
+        working-directory: infra
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Test infra/ (CDK assertions)
+        working-directory: infra
+        run: pytest tests/ -v
+
+      - name: cdk synth
+        # No AWS credentials needed — synth only renders CloudFormation locally.
+        working-directory: infra
+        run: npx --yes aws-cdk@2 synth
+
+  deploy-staging:
+    name: Deploy to staging
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    # A GitHub Environment named "staging" — its own scoped AWS_DEPLOY_ROLE_ARN secret
+    # and AWS_REGION variable, set up manually (see SETUP.md; this session can't
+    # provision your AWS account or repo settings for you).
+    environment: staging
+    permissions:
+      id-token: write # OIDC role assumption — no long-lived AWS access keys in CI
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install root dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Train the re-ranker
+        run: python -m ml.train
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install infra dependencies
+        working-directory: infra
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: cdk diff
+        working-directory: infra
+        run: npx --yes aws-cdk@2 diff
+
+      - name: cdk deploy
+        working-directory: infra
+        run: npx --yes aws-cdk@2 deploy --require-approval never
+
+  deploy-production:
+    name: Deploy to production
+    needs: deploy-staging
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    # A separate GitHub Environment named "production", with its own AWS_DEPLOY_ROLE_ARN
+    # (pointing at a different AWS account than staging's) and AWS_REGION. This job
+    # only runs after a human approves it, IF "production" has a required-reviewers
+    # protection rule configured (repo Settings -> Environments -> production) — the
+    # workflow declares the gate by referencing the environment; the actual approval
+    # enforcement is a manual one-time repo setting (see SETUP.md).
+    environment: production
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install root dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Train the re-ranker
+        run: python -m ml.train
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install infra dependencies
+        working-directory: infra
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: cdk diff
+        working-directory: infra
+        run: npx --yes aws-cdk@2 diff
+
+      - name: cdk deploy
+        working-directory: infra
+        run: npx --yes aws-cdk@2 deploy --require-approval never

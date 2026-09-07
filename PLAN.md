@@ -174,11 +174,22 @@ CloudWatch (Logs/Metrics/Alarms) + X-Ray · SQS (DLQ) · SHAP.
 
 ## Phase 10 — CI/CD
 
-1. **GitHub Actions** workflow: on PR — lint (`ruff`/`flake8`), type-check, run unit tests
-   for each Lambda, run the ML evaluation script against a fixed sample and assert
-   metrics don't regress below a floor.
-2. On merge to `main` — `cdk diff` then `cdk deploy` to a dev/staging AWS account.
-3. Add a manual-approval gate (GitHub Environments) before deploying to prod.
+1. **GitHub Actions** workflow (`.github/workflows/ci-cd.yml`): on PR — lint (`ruff`),
+   type-check (`mypy`, scoped to `common/`/`lambdas/`/`ml/` — not `infra/`, whose CDK
+   constructs are heavily dynamic/jsii-typed and not worth fighting for type-checking
+   value), run the full `pytest` suite (all Lambdas + `common/` + `ml/`). "Run the ML
+   evaluation script against a fixed sample and assert metrics don't regress below a
+   floor" is implemented as `tests/ml/test_metrics_floor.py` — an ordinary test that
+   trains + evaluates against the committed synthetic dataset and asserts ROC-AUC/
+   Precision@10 floors, so it rides along with the normal test run rather than needing
+   a bespoke CI-only script.
+2. On push to `main` — `cdk diff` then `cdk deploy --require-approval never` to a
+   staging AWS account, via OIDC role assumption (no long-lived AWS keys in CI) using
+   a GitHub Environment named `staging` for its scoped secret/variable.
+3. A `production` GitHub Environment (same job structure, needs: `deploy-staging`) with
+   a required-reviewers protection rule is the manual-approval gate — see `SETUP.md`
+   for the one-time AWS OIDC + GitHub Environment setup this needs (real AWS accounts
+   and repo settings only you can provision).
 
 ## Phase 11 — Core pipeline validation
 

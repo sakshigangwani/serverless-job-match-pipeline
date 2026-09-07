@@ -25,7 +25,7 @@ from __future__ import annotations
 import random
 from datetime import date, datetime, time, timezone
 
-from common.models import CandidateProfile, Posting
+from common.models import CandidateProfile, Posting, RemoteStatus, VisaStatus
 from ml.features import (
     comp_range_fit,
     remote_match,
@@ -40,8 +40,10 @@ SKILL_POOL = [
     "CI/CD", "Linux", "GraphQL", "Node.js",
 ]
 SENIORITY_POOL = ["junior", "mid", "senior", "staff", "lead"]
-REMOTE_POOL = ["remote", "hybrid", "onsite", "unknown"]
-VISA_POOL = ["sponsors", "no_sponsorship", "unknown"]
+# Typed as the actual Posting field types (not plain `str`) so a random.choice() pick
+# is provably a valid value for that field — caught by mypy, not just at runtime.
+REMOTE_POOL: list[RemoteStatus] = ["remote", "hybrid", "onsite", "unknown"]
+VISA_POOL: list[VisaStatus] = ["sponsors", "no_sponsorship", "unknown"]
 
 # Fixed so estimate_candidate_seniority — and every other timestamp in the dataset — is
 # exactly reproducible regardless of what day this script happens to be run on.
