@@ -59,6 +59,14 @@ class CandidateProfile(BaseModel):
     experience: list[ExperienceEntry] = Field(default_factory=list)
     projects: list[ProjectEntry] = Field(default_factory=list)
 
+    # Matching preferences (PLAN.md Phase 6) — comp-range fit, remote match, and visa
+    # match are inherently posting-vs-candidate comparisons, so the candidate side of
+    # each comparison has to live somewhere. All default to "no stated preference" so
+    # existing profiles (like the bundled example) keep validating unchanged.
+    desired_comp_min: int | None = None  # None = no stated minimum
+    remote_preference: RemoteStatus = "unknown"  # "unknown" = no strong preference
+    needs_sponsorship: bool = False
+
     @classmethod
     def from_file(cls, path: str | Path) -> CandidateProfile:
         data = json.loads(Path(path).read_text())

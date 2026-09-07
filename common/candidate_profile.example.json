@@ -17,5 +17,8 @@
       "description": "A sample project demonstrating the candidate profile schema.",
       "technologies": ["Python", "AWS Lambda", "DynamoDB"]
     }
-  ]
+  ],
+  "desired_comp_min": 120000,
+  "remote_preference": "remote",
+  "needs_sponsorship": false
 }

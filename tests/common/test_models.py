@@ -29,6 +29,22 @@ def test_candidate_profile_is_pluggable_not_hardcoded():
     assert other.projects == []
 
 
+def test_candidate_profile_matching_preferences_default_to_no_preference():
+    profile = CandidateProfile(candidate_id="x", resume_text="text")
+
+    assert profile.desired_comp_min is None
+    assert profile.remote_preference == "unknown"
+    assert profile.needs_sponsorship is False
+
+
+def test_candidate_profile_matching_preferences_load_from_file():
+    profile = CandidateProfile.from_file(EXAMPLE_PROFILE_PATH)
+
+    assert profile.desired_comp_min == 120000
+    assert profile.remote_preference == "remote"
+    assert profile.needs_sponsorship is False
+
+
 def test_candidate_profile_section_texts_covers_all_sections():
     profile = CandidateProfile.from_file(EXAMPLE_PROFILE_PATH)
     sections = profile.section_texts()

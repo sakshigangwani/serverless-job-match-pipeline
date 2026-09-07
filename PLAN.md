@@ -89,20 +89,29 @@ CloudWatch (Logs/Metrics/Alarms) + X-Ray · SQS (DLQ) · SHAP.
 
 ## Phase 6 — Match-scoring model (offline ML, the rigor component)
 
-1. **Baseline**: implement keyword/BM25 matching as the naive baseline (`rank_bm25` or a
-   simple TF-IDF cosine).
+1. **Baseline**: implement keyword/BM25 matching as the naive baseline (`ml/baselines.py`,
+   using `rank_bm25`).
 2. **Embedding similarity**: cosine similarity between candidate and posting embeddings
-   (already computed in Phase 4) as the second baseline.
+   (already computed in Phase 4/5) as the second baseline (`ml/baselines.py`).
 3. **Labeling**: manually label 150–300 postings as good-fit / not-a-fit for a candidate
-   profile → held-out test set (`ml/labels.csv`).
+   profile → held-out test set (`ml/data/labels.csv`). Real manual labeling requires a
+   human's real resume against real scraped postings, which can't be fabricated — a
+   synthetic-but-structurally-realistic dataset (`ml/synthetic_data.py`) stands in so the
+   rest of the pipeline is built and proven correct end-to-end; `ml/README.md` documents
+   the real-data workflow this gets swapped for once postings have accumulated.
 4. **Re-ranker**: engineer features (skill overlap count, seniority match, comp-range fit,
-   remote/visa match, embedding similarity) and train a classifier with **scikit-learn** /
-   **XGBoost** (logistic regression + gradient-boosted trees, compare both).
-5. Package the trained model as a **Lambda layer** (pickled/joblib model + inference code)
-   so the pipeline's scoring Lambda can load it without retraining at inference time.
+   remote/visa match, embedding similarity — `ml/features.py`, shared with Phase 7's
+   inference path to avoid training/serving skew) and train a classifier with
+   **scikit-learn** / **XGBoost** (logistic regression + gradient-boosted trees, compare
+   both — `ml/train.py`, keeping whichever wins on held-out ROC-AUC).
+5. The trained model is saved as a self-describing joblib artifact
+   (`ml/artifacts/reranker.joblib`, gitignored/regenerated, not committed). Packaging it
+   as an actual **Lambda layer** is Phase 7's job, since that's the CDK construct that
+   naturally belongs with the Lambda that loads it.
 6. **Evaluation**: compute Precision@K, Recall@K, ROC-AUC for each of the three approaches
    (keyword-only, embedding-only, embedding+re-ranker) and record the improvement delta in
-   `ml/evaluation_report.md`. This produces the resume-bullet numbers from the spec.
+   `ml/evaluation_report.md` (`ml/evaluate.py`) — using the synthetic dataset until real
+   labels replace it; the report explicitly flags itself as not resume-bullet-ready yet.
 
 ## Phase 7 — Scoring + threshold + alerting Lambda (core pipeline, stage 2)
 
