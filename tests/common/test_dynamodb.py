@@ -1,12 +1,17 @@
 from datetime import datetime, timezone
 from decimal import Decimal
 
+import pytest
+from boto3.dynamodb.types import Binary
+
 from common.dynamodb import (
     GSI_PARTITION_KEY,
     GSI_PARTITION_VALUE,
     PARTITION_KEY,
     from_dynamodb_item,
+    pack_embedding,
     to_dynamodb_item,
+    unpack_embedding,
 )
 from common.models import Posting
 
@@ -80,3 +85,33 @@ def test_item_round_trip_preserves_embedding_similarity():
 
     assert restored == original
     assert isinstance(restored.embedding_similarity, float)
+
+
+def test_pack_embedding_returns_dynamodb_binary_type():
+    packed = pack_embedding([0.1, 0.2, 0.3])
+
+    assert isinstance(packed, Binary)
+
+
+def test_pack_embedding_is_compact_4_bytes_per_float():
+    vector = [0.1] * 1024
+
+    packed = pack_embedding(vector)
+
+    assert len(bytes(packed)) == 1024 * 4
+
+
+def test_embedding_round_trip_preserves_values_to_float32_precision():
+    original = [0.1, -2.5, 3.14159, 0.0, 100.0]
+
+    restored = unpack_embedding(pack_embedding(original))
+
+    assert restored == pytest.approx(original, rel=1e-6)
+
+
+def test_unpack_embedding_accepts_raw_bytes_not_just_binary_wrapper():
+    packed = pack_embedding([1.0, 2.0])
+
+    restored = unpack_embedding(bytes(packed))
+
+    assert restored == pytest.approx([1.0, 2.0])

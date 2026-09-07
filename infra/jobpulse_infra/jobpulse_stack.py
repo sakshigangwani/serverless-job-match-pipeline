@@ -10,6 +10,9 @@ from aws_cdk import (
     Stack,
 )
 from aws_cdk import (
+    aws_dynamodb as dynamodb,
+)
+from aws_cdk import (
     aws_events as events,
 )
 from aws_cdk import (
@@ -20,6 +23,9 @@ from aws_cdk import (
 )
 from aws_cdk import (
     aws_lambda as _lambda,
+)
+from aws_cdk import (
+    aws_lambda_event_sources as lambda_event_sources,
 )
 from aws_cdk import (
     aws_s3 as s3,
@@ -35,6 +41,15 @@ LAYER_BUILD_ROOT = Path(__file__).resolve().parent / ".layer_build"
 
 DEFAULT_BEDROCK_MODEL_ID = "anthropic.claude-3-5-sonnet-20241022-v2:0"
 DEFAULT_BEDROCK_EMBEDDING_MODEL_ID = "amazon.titan-embed-text-v2:0"
+
+# Mirrors common/dynamodb.py's key schema constants. Not imported directly: the CDK app
+# runs in infra/.venv, a separate Python environment from the root venv that doesn't
+# have common's dependencies (pydantic) installed — infra intentionally doesn't depend
+# on application code, only on the plain strings that make up the table's key schema.
+PARTITION_KEY = "posting_id"
+GSI_NAME = "ScoreIndex"
+GSI_PARTITION_KEY = "gsi_pk"
+GSI_SORT_KEY = "score"
 
 
 def _pinned_version(package: str) -> str:
@@ -131,6 +146,31 @@ class JobPulseStack(Stack):
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
         )
 
+        # --- Structured store (PLAN.md Phase 5) ---
+        # Stream enabled so the embed Lambda can react to newly-extracted postings
+        # (NEW_IMAGE is enough — embed only needs the item's current field values, not
+        # what changed). PAY_PER_REQUEST: postings/day volume is low and spiky (bursts
+        # on each 6-hour ingestion cycle), not steady enough to right-size provisioned
+        # capacity for.
+        postings_table = dynamodb.Table(
+            self,
+            "PostingsTable",
+            partition_key=dynamodb.Attribute(
+                name=PARTITION_KEY, type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,  # dev default; use RETAIN in prod
+            stream=dynamodb.StreamViewType.NEW_IMAGE,
+        )
+        postings_table.add_global_secondary_index(
+            index_name=GSI_NAME,
+            partition_key=dynamodb.Attribute(
+                name=GSI_PARTITION_KEY, type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(name=GSI_SORT_KEY, type=dynamodb.AttributeType.NUMBER),
+            projection_type=dynamodb.ProjectionType.ALL,
+        )
+
         # --- Shared data-contracts layer, consumed by every Lambda (Phase 1 code) ---
         common_layer = _lambda.LayerVersion(
             self,
@@ -187,10 +227,15 @@ class JobPulseStack(Stack):
             layers=[common_layer, pydantic_layer],
             timeout=Duration.seconds(60),  # allows for the Bedrock call + one retry
             memory_size=512,
-            environment={"BEDROCK_MODEL_ID": DEFAULT_BEDROCK_MODEL_ID},
+            environment={
+                "BEDROCK_MODEL_ID": DEFAULT_BEDROCK_MODEL_ID,
+                "POSTINGS_TABLE_NAME": postings_table.table_name,
+            },
         )
-        # Least privilege: read only the raw/ prefix it consumes, write only the
-        # structured/ prefix it produces — not full read/write on the whole bucket.
+        # Least privilege: read only the raw/ prefix it consumes from S3. It only ever
+        # creates new DynamoDB items (one per posting_id, set once at extraction time),
+        # never reads or modifies an existing one — PutItem only, not grant_write_data's
+        # broader PutItem/UpdateItem/DeleteItem/BatchWriteItem set.
         extract_lambda.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["s3:GetObject"],
@@ -199,8 +244,8 @@ class JobPulseStack(Stack):
         )
         extract_lambda.add_to_role_policy(
             iam.PolicyStatement(
-                actions=["s3:PutObject"],
-                resources=[raw_postings_bucket.arn_for_objects("structured/*")],
+                actions=["dynamodb:PutItem"],
+                resources=[postings_table.table_arn],
             )
         )
         extract_lambda.add_to_role_policy(
@@ -219,7 +264,7 @@ class JobPulseStack(Stack):
             s3.NotificationKeyFilter(prefix="raw/", suffix=".json"),
         )
 
-        # --- Embedding Lambda (PLAN.md Phase 4) ---
+        # --- Embedding Lambda (PLAN.md Phase 4, trigger + persistence updated in Phase 5) ---
         embed_lambda = _lambda.Function(
             self,
             "EmbedLambda",
@@ -230,27 +275,27 @@ class JobPulseStack(Stack):
             layers=[common_layer, pydantic_layer],
             timeout=Duration.seconds(60),
             memory_size=512,
-            environment={"BEDROCK_EMBEDDING_MODEL_ID": DEFAULT_BEDROCK_EMBEDDING_MODEL_ID},
+            environment={
+                "BEDROCK_EMBEDDING_MODEL_ID": DEFAULT_BEDROCK_EMBEDDING_MODEL_ID,
+                "POSTINGS_TABLE_NAME": postings_table.table_name,
+                "RAW_BUCKET_NAME": raw_postings_bucket.bucket_name,
+            },
         )
-        # Least privilege: read-only on structured/ (what it consumes), write-only on
-        # embeddings/ (what it produces). candidate/ needs both verbs — it's a
-        # cache-aside read-or-populate on one fixed key, not a producer/consumer split.
-        embed_lambda.add_to_role_policy(
-            iam.PolicyStatement(
-                actions=["s3:GetObject"],
-                resources=[raw_postings_bucket.arn_for_objects("structured/*")],
-            )
-        )
-        embed_lambda.add_to_role_policy(
-            iam.PolicyStatement(
-                actions=["s3:PutObject"],
-                resources=[raw_postings_bucket.arn_for_objects("embeddings/*")],
-            )
-        )
+        # Least privilege: only the candidate/ cache prefix needs S3 access now — the
+        # posting itself arrives via the DynamoDB stream, and the embedding/similarity
+        # go back via UpdateItem, not an S3 write.
         embed_lambda.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["s3:GetObject", "s3:PutObject"],
                 resources=[raw_postings_bucket.arn_for_objects("candidate/*")],
+            )
+        )
+        # UpdateItem only, not PutItem: this Lambda only ever patches a row extraction
+        # already created, never creates one — the exact inverse of extraction's grant.
+        embed_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["dynamodb:UpdateItem"],
+                resources=[postings_table.table_arn],
             )
         )
         embed_lambda.add_to_role_policy(
@@ -262,16 +307,27 @@ class JobPulseStack(Stack):
             )
         )
 
-        # --- Event-driven trigger: new structured posting -> embed (PLAN.md Phase 4) ---
-        # Writes only to embeddings/, never back to structured/, so this can never
-        # re-trigger itself.
-        raw_postings_bucket.add_event_notification(
-            s3.EventType.OBJECT_CREATED,
-            s3n.LambdaDestination(embed_lambda),
-            s3.NotificationKeyFilter(prefix="structured/", suffix=".json"),
+        # --- Event-driven trigger: new posting row -> embed (PLAN.md Phase 5) ---
+        # INSERT-only filter: this Lambda's own UpdateItem calls produce MODIFY stream
+        # records, which the filter excludes, so it can never re-trigger itself.
+        # add_event_source also grants the stream-read permissions (DescribeStream,
+        # GetRecords, GetShardIterator, ListStreams) automatically.
+        embed_lambda.add_event_source(
+            lambda_event_sources.DynamoEventSource(
+                postings_table,
+                starting_position=_lambda.StartingPosition.LATEST,
+                batch_size=1,
+                retry_attempts=2,
+                filters=[
+                    _lambda.FilterCriteria.filter(
+                        {"eventName": _lambda.FilterRule.is_equal("INSERT")}
+                    )
+                ],
+            )
         )
 
         self.raw_postings_bucket = raw_postings_bucket
+        self.postings_table = postings_table
         self.common_layer = common_layer
         self.pydantic_layer = pydantic_layer
         self.fetch_lambda = fetch_lambda

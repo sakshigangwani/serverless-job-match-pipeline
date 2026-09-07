@@ -2,6 +2,11 @@
 
 `compute_posting_hash` is the identity used for dedup/change-detection (Phase 12) and, by
 default, as the DynamoDB `posting_id` — see common/dynamodb.py.
+
+Phase 3 and Phase 4 originally used interim S3 prefixes (structured/, embeddings/) for
+their output, before DynamoDB existed. Phase 5 replaced both with DynamoDB writes, so
+those key builders were removed — raw/ (below) and the candidate embeddings cache remain
+the only S3 conventions.
 """
 from __future__ import annotations
 
@@ -28,34 +33,6 @@ def raw_posting_key(source: str, when: date | datetime | str, posting_hash: str)
     else:
         date_str = when
     return f"raw/{source}/{date_str}/{posting_hash}.json"
-
-
-def structured_posting_key(source: str, when: date | datetime | str, posting_hash: str) -> str:
-    """Build the extraction Lambda's output key: structured/{source}/{date}/{posting_hash}.json
-
-    Interim persistence for the extracted Posting record, mirroring the raw/ convention.
-    Phase 5 introduces DynamoDB as the real structured store; until then this S3 prefix
-    lets extraction (Phase 3) be built, deployed, and tested independently.
-    """
-    if isinstance(when, (date, datetime)):
-        date_str = when.strftime("%Y-%m-%d")
-    else:
-        date_str = when
-    return f"structured/{source}/{date_str}/{posting_hash}.json"
-
-
-def posting_embedding_key(source: str, when: date | datetime | str, posting_hash: str) -> str:
-    """Build the embedding Lambda's output key: embeddings/{source}/{date}/{posting_hash}.json
-
-    A posting's embedding vector is a large, purely-internal ML artifact (never shown to
-    a user), so it's kept in its own S3 prefix rather than bloating the structured/
-    Posting record (PLAN.md Phase 4.3).
-    """
-    if isinstance(when, (date, datetime)):
-        date_str = when.strftime("%Y-%m-%d")
-    else:
-        date_str = when
-    return f"embeddings/{source}/{date_str}/{posting_hash}.json"
 
 
 # Fixed key: the candidate profile changes rarely (only when a resume is updated), so its
