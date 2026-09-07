@@ -1,0 +1,21 @@
+{
+  "candidate_id": "example-candidate",
+  "resume_text": "Software engineer with experience building backend services and data pipelines.",
+  "skills": ["Python", "AWS", "SQL", "Machine Learning"],
+  "experience": [
+    {
+      "title": "Software Engineer",
+      "company": "Example Corp",
+      "start_date": "2022-01",
+      "end_date": null,
+      "description": "Built and maintained backend services and internal data pipelines."
+    }
+  ],
+  "projects": [
+    {
+      "name": "Example Project",
+      "description": "A sample project demonstrating the candidate profile schema.",
+      "technologies": ["Python", "AWS Lambda", "DynamoDB"]
+    }
+  ]
+}

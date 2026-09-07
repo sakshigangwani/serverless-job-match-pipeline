@@ -22,3 +22,7 @@ ml/artifacts/
 
 # Node (dashboard/tooling, if ever added)
 node_modules/
+
+# Local-only Claude Code guidance, not published to the repo
+CLAUDE.md
+PHASE1_NOTES.md
