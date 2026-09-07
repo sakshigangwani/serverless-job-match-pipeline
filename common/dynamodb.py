@@ -28,11 +28,16 @@ GSI_PARTITION_VALUE = "POSTING"
 GSI_SORT_KEY = "score"
 
 
+_DECIMAL_FIELDS = ("score", "embedding_similarity")
+
+
 def to_dynamodb_item(posting: Posting) -> dict[str, Any]:
     """Convert a Posting into a DynamoDB-ready item (Decimal scores, ISO-8601 timestamps)."""
     item: dict[str, Any] = posting.model_dump(mode="python")
     item["ingested_at"] = posting.ingested_at.isoformat()
-    item["score"] = Decimal(str(posting.score)) if posting.score is not None else None
+    for field in _DECIMAL_FIELDS:
+        value = item[field]
+        item[field] = Decimal(str(value)) if value is not None else None
     item[GSI_PARTITION_KEY] = GSI_PARTITION_VALUE
     return item
 
@@ -42,6 +47,7 @@ def from_dynamodb_item(item: dict[str, Any]) -> Posting:
     data = {k: v for k, v in item.items() if k != GSI_PARTITION_KEY}
     if isinstance(data.get("ingested_at"), str):
         data["ingested_at"] = datetime.fromisoformat(data["ingested_at"])
-    if isinstance(data.get("score"), Decimal):
-        data["score"] = float(data["score"])
+    for field in _DECIMAL_FIELDS:
+        if isinstance(data.get(field), Decimal):
+            data[field] = float(data[field])
     return Posting.model_validate(data)

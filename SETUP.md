@@ -27,9 +27,11 @@ done on your behalf:
 3. Pick a dev region (e.g. `us-east-1`) and confirm **Amazon Bedrock model access** is
    enabled for Claude and Titan Embeddings in that region/account (Bedrock model access is
    opt-in per account and must be requested in the console before Phase 3/4 will work).
-   The extraction Lambda (Phase 3) defaults to `BEDROCK_MODEL_ID=anthropic.claude-3-5-sonnet-20241022-v2:0`
-   (`infra/jobpulse_infra/jobpulse_stack.py`) — if that model isn't enabled/available in
-   your account/region, request access to it or update the env var to one that is.
+   The extraction Lambda (Phase 3) defaults to `BEDROCK_MODEL_ID=anthropic.claude-3-5-sonnet-20241022-v2:0`,
+   and the embedding Lambda (Phase 4) defaults to
+   `BEDROCK_EMBEDDING_MODEL_ID=amazon.titan-embed-text-v2:0` (both in
+   `infra/jobpulse_infra/jobpulse_stack.py`) — if either model isn't enabled/available in
+   your account/region, request access to it or update the corresponding env var.
 4. Export or reference the profile when running CDK, e.g.:
    ```
    export AWS_PROFILE=jobpulse-dev

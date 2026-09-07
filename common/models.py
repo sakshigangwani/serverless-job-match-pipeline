@@ -17,6 +17,11 @@ from pydantic import BaseModel, Field, model_validator
 RemoteStatus = Literal["remote", "hybrid", "onsite", "unknown"]
 VisaStatus = Literal["sponsors", "no_sponsorship", "unknown"]
 
+# Bundled into CommonLayer alongside common/*.py (PLAN.md Phase 0's layer build copies
+# *.json too) — the default pluggable profile the embedding Lambda embeds against unless
+# CANDIDATE_PROFILE_PATH overrides it (PLAN.md Phase 4.1).
+DEFAULT_CANDIDATE_PROFILE_PATH = Path(__file__).resolve().parent / "candidate_profile.example.json"
+
 
 class ExperienceEntry(BaseModel):
     title: str
@@ -92,6 +97,11 @@ class Posting(BaseModel):
     remote_status: RemoteStatus = "unknown"
     visa_status: VisaStatus = "unknown"
     description_text: str = ""
+
+    # Raw cosine similarity against the candidate's resume embedding (PLAN.md Phase 4) —
+    # the embedding-only baseline. Distinct from `score`, which is the final re-ranked
+    # decision score produced once the Phase 6 model exists.
+    embedding_similarity: float | None = None
 
     score: float | None = None
     alert_sent: bool = False

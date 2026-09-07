@@ -59,3 +59,24 @@ def test_from_item_ignores_gsi_partition_key():
     restored = from_dynamodb_item(item)
 
     assert not hasattr(restored, GSI_PARTITION_KEY)
+
+
+def test_to_item_converts_embedding_similarity_to_decimal():
+    item = to_dynamodb_item(_sample_posting(embedding_similarity=0.732))
+
+    assert isinstance(item["embedding_similarity"], Decimal)
+    assert item["embedding_similarity"] == Decimal("0.732")
+
+
+def test_to_item_handles_missing_embedding_similarity():
+    item = to_dynamodb_item(_sample_posting(embedding_similarity=None))
+
+    assert item["embedding_similarity"] is None
+
+
+def test_item_round_trip_preserves_embedding_similarity():
+    original = _sample_posting(embedding_similarity=0.5)
+    restored = from_dynamodb_item(to_dynamodb_item(original))
+
+    assert restored == original
+    assert isinstance(restored.embedding_similarity, float)

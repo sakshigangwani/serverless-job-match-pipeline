@@ -42,3 +42,24 @@ def structured_posting_key(source: str, when: date | datetime | str, posting_has
     else:
         date_str = when
     return f"structured/{source}/{date_str}/{posting_hash}.json"
+
+
+def posting_embedding_key(source: str, when: date | datetime | str, posting_hash: str) -> str:
+    """Build the embedding Lambda's output key: embeddings/{source}/{date}/{posting_hash}.json
+
+    A posting's embedding vector is a large, purely-internal ML artifact (never shown to
+    a user), so it's kept in its own S3 prefix rather than bloating the structured/
+    Posting record (PLAN.md Phase 4.3).
+    """
+    if isinstance(when, (date, datetime)):
+        date_str = when.strftime("%Y-%m-%d")
+    else:
+        date_str = when
+    return f"embeddings/{source}/{date_str}/{posting_hash}.json"
+
+
+# Fixed key: the candidate profile changes rarely (only when a resume is updated), so its
+# embeddings are computed once and cached here rather than per-posting (PLAN.md Phase 4.1).
+# Cache invalidation is manual for now — delete this object to force a recompute after
+# changing the candidate profile.
+CANDIDATE_EMBEDDINGS_KEY = "candidate/embeddings.json"

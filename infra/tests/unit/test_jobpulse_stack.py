@@ -1,6 +1,5 @@
 import aws_cdk as core
-import aws_cdk.assertions as assertions
-
+from aws_cdk import assertions
 from jobpulse_infra.jobpulse_stack import JobPulseStack
 
 
@@ -191,6 +190,161 @@ def test_raw_postings_bucket_notifies_extract_lambda_on_new_raw_objects():
                                             [
                                                 {"Name": "suffix", "Value": ".json"},
                                                 {"Name": "prefix", "Value": "raw/"},
+                                            ]
+                                        )
+                                    }
+                                }
+                            }
+                        )
+                    ]
+                )
+            }
+        },
+    )
+
+
+def test_embed_lambda_has_both_layers_and_embedding_model_env():
+    template = _synth_template()
+
+    matches = template.find_resources(
+        "AWS::Lambda::Function",
+        {
+            "Properties": {
+                "Handler": "handler.handler",
+                "Runtime": "python3.12",
+                "Environment": {
+                    "Variables": {
+                        "BEDROCK_EMBEDDING_MODEL_ID": assertions.Match.any_value()
+                    }
+                },
+            }
+        },
+    )
+
+    assert len(matches) == 1
+    (resource,) = matches.values()
+    assert len(resource["Properties"]["Layers"]) == 2
+
+
+def test_embed_lambda_role_scoped_to_structured_embeddings_and_candidate_prefixes():
+    template = _synth_template()
+
+    template.has_resource_properties(
+        "AWS::IAM::Policy",
+        {
+            "PolicyDocument": {
+                "Statement": assertions.Match.array_with(
+                    [
+                        assertions.Match.object_like(
+                            {
+                                "Action": "s3:GetObject",
+                                "Effect": "Allow",
+                                "Resource": assertions.Match.object_like(
+                                    {
+                                        "Fn::Join": assertions.Match.array_with(
+                                            [
+                                                assertions.Match.array_with(
+                                                    ["/structured/*"]
+                                                )
+                                            ]
+                                        )
+                                    }
+                                ),
+                            }
+                        ),
+                        assertions.Match.object_like(
+                            {
+                                "Action": "s3:PutObject",
+                                "Effect": "Allow",
+                                "Resource": assertions.Match.object_like(
+                                    {
+                                        "Fn::Join": assertions.Match.array_with(
+                                            [
+                                                assertions.Match.array_with(
+                                                    ["/embeddings/*"]
+                                                )
+                                            ]
+                                        )
+                                    }
+                                ),
+                            }
+                        ),
+                        assertions.Match.object_like(
+                            {
+                                "Action": ["s3:GetObject", "s3:PutObject"],
+                                "Effect": "Allow",
+                                "Resource": assertions.Match.object_like(
+                                    {
+                                        "Fn::Join": assertions.Match.array_with(
+                                            [
+                                                assertions.Match.array_with(
+                                                    ["/candidate/*"]
+                                                )
+                                            ]
+                                        )
+                                    }
+                                ),
+                            }
+                        ),
+                    ]
+                )
+            }
+        },
+    )
+
+
+def test_embed_lambda_role_can_invoke_only_titan_embedding_models():
+    template = _synth_template()
+
+    template.has_resource_properties(
+        "AWS::IAM::Policy",
+        {
+            "PolicyDocument": {
+                "Statement": assertions.Match.array_with(
+                    [
+                        assertions.Match.object_like(
+                            {
+                                "Action": "bedrock:InvokeModel",
+                                "Effect": "Allow",
+                                "Resource": assertions.Match.object_like(
+                                    {
+                                        "Fn::Join": assertions.Match.array_with(
+                                            [
+                                                assertions.Match.array_with(
+                                                    [
+                                                        "::foundation-model/amazon.titan-embed*"
+                                                    ]
+                                                )
+                                            ]
+                                        )
+                                    }
+                                ),
+                            }
+                        )
+                    ]
+                )
+            }
+        },
+    )
+
+
+def test_raw_postings_bucket_notifies_embed_lambda_on_new_structured_objects():
+    template = _synth_template()
+
+    template.has_resource_properties(
+        "Custom::S3BucketNotifications",
+        {
+            "NotificationConfiguration": {
+                "LambdaFunctionConfigurations": assertions.Match.array_with(
+                    [
+                        assertions.Match.object_like(
+                            {
+                                "Filter": {
+                                    "Key": {
+                                        "FilterRules": assertions.Match.array_with(
+                                            [
+                                                {"Name": "suffix", "Value": ".json"},
+                                                {"Name": "prefix", "Value": "structured/"},
                                             ]
                                         )
                                     }
