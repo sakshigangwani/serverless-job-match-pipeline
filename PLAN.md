@@ -202,12 +202,30 @@ CloudWatch (Logs/Metrics/Alarms) + X-Ray · SQS (DLQ) · SHAP.
 
 ## Phase 12 — SQS Dead-Letter Queue + retry logic (spec §5.1)
 
-1. Add an **SQS** DLQ to the extraction and embedding Lambdas (via Lambda destinations, or
-   event-source-mapping/on-failure DLQ config in CDK).
-2. Configure exponential backoff retry (Lambda's built-in async retry, or a Step
-   Functions/SQS visibility-timeout-based backoff) before a failed message lands in the DLQ.
-3. Add a CloudWatch alarm on DLQ depth so failures are visible (ties back into Phase 9).
-4. Write a small redrive/reprocessing script or Lambda to replay DLQ messages after a fix.
+1. Add an **SQS** DLQ to the extraction and embedding Lambdas — via two *different*
+   mechanisms, because they're triggered two different ways. Extraction is invoked
+   *asynchronously* by an S3 event, so its DLQ is a Lambda Destinations `on_failure`
+   target configured on the function itself. Embedding is driven by a DynamoDB Streams
+   *event source mapping* (a poller, not a direct async invoke), so its DLQ is
+   configured on the event source mapping's own `on_failure`, a separate mechanism —
+   the Lambda-level `dead_letter_queue`/`on_failure` properties don't apply to
+   stream-sourced event sources at all.
+2. Retry before landing in the DLQ: extraction's async invocation gets Lambda's
+   built-in retry (`retry_attempts=2`, `max_event_age` capping how long retries are
+   attempted) with an AWS-managed backoff between attempts, not a configurable formula;
+   embedding's event source mapping has its own `retry_attempts` on the poller, same
+   caveat.
+3. A CloudWatch alarm on each DLQ's depth (`ApproximateNumberOfMessagesVisible`,
+   threshold 1 — any message means retries were already exhausted) ties back into
+   Phase 9's dashboard and alarm set.
+4. `lambdas/dlq_redrive/`: manually invoked, handles the two DLQs differently because
+   their messages carry different content. Extraction's DLQ message (Lambda
+   Destinations) includes the original S3 event as `requestPayload` — redriving it is
+   a direct re-invoke with that event. Embedding's DLQ message (event-source-mapping
+   DLQ) carries only *batch metadata*, never the failed record's content — redriving
+   means finding postings still missing an `embedding` attribute in DynamoDB (the item
+   itself is untouched by embedding's failure) and synthesizing a fresh stream-event-
+   shaped payload from the current item to re-invoke embedding with.
 
 ## Phase 13 — Explainability (SHAP) (spec §5.2)
 

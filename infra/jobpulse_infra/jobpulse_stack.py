@@ -31,6 +31,9 @@ from aws_cdk import (
     aws_lambda as _lambda,
 )
 from aws_cdk import (
+    aws_lambda_destinations as destinations,
+)
+from aws_cdk import (
     aws_lambda_event_sources as lambda_event_sources,
 )
 from aws_cdk import (
@@ -44,6 +47,9 @@ from aws_cdk import (
 )
 from aws_cdk import (
     aws_sns_subscriptions as sns_subscriptions,
+)
+from aws_cdk import (
+    aws_sqs as sqs,
 )
 from constructs import Construct
 
@@ -283,6 +289,14 @@ class JobPulseStack(Stack):
             targets=[targets.LambdaFunction(fetch_lambda)],
         )
 
+        # --- Extraction DLQ (PLAN.md Phase 12.1) ---
+        # S3 invokes extract_lambda *asynchronously*, so Lambda's own built-in async
+        # retry (retry_attempts below) and Destinations (on_failure) apply directly to
+        # the function itself — a fundamentally different mechanism from embed's
+        # DynamoDB-Streams-sourced DLQ further down, which is configured on the event
+        # source mapping instead, since a stream poller manages its own retries.
+        extract_dlq = sqs.Queue(self, "ExtractDlq", retention_period=Duration.days(14))
+
         # --- Extraction Lambda (PLAN.md Phase 3) ---
         extract_lambda = _lambda.Function(
             self,
@@ -295,6 +309,13 @@ class JobPulseStack(Stack):
             timeout=Duration.seconds(60),  # allows for the Bedrock call + one retry
             memory_size=512,
             tracing=_lambda.Tracing.ACTIVE,
+            # Lambda's own async-invoke retry (AWS-managed backoff between attempts,
+            # not a formula we configure directly) tries up to twice more before
+            # giving up, or up to 2 hours after the original invocation — whichever
+            # comes first — then delivers the failed event + error details to the DLQ.
+            retry_attempts=2,
+            max_event_age=Duration.hours(2),
+            on_failure=destinations.SqsDestination(extract_dlq),
             environment={
                 "BEDROCK_MODEL_ID": DEFAULT_BEDROCK_MODEL_ID,
                 "POSTINGS_TABLE_NAME": postings_table.table_name,
@@ -376,6 +397,13 @@ class JobPulseStack(Stack):
             )
         )
 
+        # --- Embedding DLQ (PLAN.md Phase 12.1) ---
+        # A DynamoDB-Streams-sourced DLQ message carries only *batch metadata* (shard
+        # id, sequence range) — never the failed record's content, since stream data
+        # can roll off before a redrive happens. See lambdas/dlq_redrive/handler.py's
+        # docstring for how redriving this queue actually works as a result.
+        embed_dlq = sqs.Queue(self, "EmbedDlq", retention_period=Duration.days(14))
+
         # --- Event-driven trigger: new posting row -> embed (PLAN.md Phase 5) ---
         # INSERT-only filter: this Lambda's own UpdateItem calls produce MODIFY stream
         # records, which the filter excludes, so it can never re-trigger itself.
@@ -387,6 +415,7 @@ class JobPulseStack(Stack):
                 starting_position=_lambda.StartingPosition.LATEST,
                 batch_size=1,
                 retry_attempts=2,
+                on_failure=lambda_event_sources.SqsDlq(embed_dlq),
                 filters=[
                     _lambda.FilterCriteria.filter(
                         {"eventName": _lambda.FilterRule.is_equal("INSERT")}
@@ -535,13 +564,45 @@ class JobPulseStack(Stack):
         )
         usage_plan.add_api_key(query_api_key)
 
-        # --- Alarms (PLAN.md Phase 9.2) ---
+        # --- DLQ redrive Lambda (PLAN.md Phase 12.4) ---
+        # Manually invoked (never triggered automatically) after investigating and
+        # fixing whatever caused failures — see lambdas/dlq_redrive/handler.py's
+        # docstring for why extraction and embedding are redriven differently.
+        dlq_redrive_lambda = _lambda.Function(
+            self,
+            "DlqRedriveLambda",
+            runtime=_lambda.Runtime.PYTHON_3_12,
+            architecture=_lambda.Architecture.X86_64,
+            handler="handler.handler",
+            code=_lambda.Code.from_asset(str(LAMBDAS_DIR / "dlq_redrive")),
+            layers=[common_layer],
+            timeout=Duration.minutes(2),
+            memory_size=256,
+            tracing=_lambda.Tracing.ACTIVE,
+            environment={
+                "EXTRACT_DLQ_URL": extract_dlq.queue_url,
+                "EMBED_DLQ_URL": embed_dlq.queue_url,
+                "EXTRACT_FUNCTION_NAME": extract_lambda.function_name,
+                "EMBED_FUNCTION_NAME": embed_lambda.function_name,
+                "POSTINGS_TABLE_NAME": postings_table.table_name,
+            },
+        )
+        extract_dlq.grant_consume_messages(dlq_redrive_lambda)
+        embed_dlq.grant_consume_messages(dlq_redrive_lambda)
+        extract_lambda.grant_invoke(dlq_redrive_lambda)
+        embed_lambda.grant_invoke(dlq_redrive_lambda)
+        # Scan only, and only this table: an operator-triggered maintenance path run
+        # infrequently, not the query API's hot path — a table scan here is fine.
+        dlq_redrive_lambda.add_to_role_policy(
+            iam.PolicyStatement(actions=["dynamodb:Scan"], resources=[postings_table.table_arn])
+        )
+
+        # --- Alarms (PLAN.md Phase 9.2, DLQ depth added in Phase 12.3) ---
         # Every core-pipeline Lambda gets the same two alarms: an error-rate alarm
         # (errors as a percentage of invocations, not a raw count — a fixed count
         # means something different for a Lambda invoked twice a day vs. one invoked
         # constantly) and a duration alarm at 80% of that Lambda's own configured
-        # timeout (an early warning before it starts actually timing out). A DLQ-depth
-        # alarm is intentionally not here yet — there's no DLQ until Phase 12.
+        # timeout (an early warning before it starts actually timing out).
         pipeline_lambdas = {
             "Fetch": (fetch_lambda, fetch_lambda.timeout),
             "Extract": (extract_lambda, extract_lambda.timeout),
@@ -584,6 +645,22 @@ class JobPulseStack(Stack):
 
         for id_prefix, (fn, timeout) in pipeline_lambdas.items():
             add_lambda_alarms(fn, id_prefix, timeout)
+
+        # DLQ depth alarms (PLAN.md Phase 12.3): unlike the error-rate alarms above,
+        # this fires on *any* accumulation (threshold=1) — a message in a DLQ means
+        # automatic retries were already exhausted, so there's nothing to average
+        # against a volume baseline the way error-rate is; even one message is
+        # something worth a human looking at.
+        for id_prefix, dlq in (("ExtractDlq", extract_dlq), ("EmbedDlq", embed_dlq)):
+            cloudwatch.Alarm(
+                self,
+                f"{id_prefix}DepthAlarm",
+                metric=dlq.metric_approximate_number_of_messages_visible(period=Duration.minutes(5)),
+                threshold=1,
+                evaluation_periods=1,
+                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+                alarm_description=f"{id_prefix} has messages — automatic retries were exhausted",
+            )
 
         # --- Dashboard (PLAN.md Phase 9.4) ---
         dashboard = cloudwatch.Dashboard(self, "PipelineDashboard", dashboard_name="JobPulse-Pipeline")
@@ -639,6 +716,17 @@ class JobPulseStack(Stack):
                 left=[cloudwatch.Metric(namespace="JobPulse", metric_name="AlertsSent", statistic="Sum")],
             ),
         )
+        # DLQ depth (PLAN.md Phase 12) — same metric the alarms above watch, surfaced
+        # visually so a growing queue is visible on the dashboard before it trips one.
+        dashboard.add_widgets(
+            cloudwatch.GraphWidget(
+                title="DLQ Depth",
+                left=[
+                    extract_dlq.metric_approximate_number_of_messages_visible(),
+                    embed_dlq.metric_approximate_number_of_messages_visible(),
+                ],
+            ),
+        )
 
         self.raw_postings_bucket = raw_postings_bucket
         self.postings_table = postings_table
@@ -646,9 +734,12 @@ class JobPulseStack(Stack):
         self.pydantic_layer = pydantic_layer
         self.fetch_lambda = fetch_lambda
         self.extract_lambda = extract_lambda
+        self.extract_dlq = extract_dlq
         self.embed_lambda = embed_lambda
+        self.embed_dlq = embed_dlq
         self.alerts_topic = alerts_topic
         self.threshold_lambda = threshold_lambda
         self.alert_email_lambda = alert_email_lambda
         self.query_api_lambda = query_api_lambda
         self.query_api = query_api
+        self.dlq_redrive_lambda = dlq_redrive_lambda

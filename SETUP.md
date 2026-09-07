@@ -133,3 +133,21 @@ either:
      `deploy-production` runs automatically right after `deploy-staging` succeeds.
 3. Push to `main` (or merge a PR) to trigger `deploy-staging` — `deploy-production`
    then waits for the approval configured in step 2 before running.
+
+## Redriving failed postings (Phase 12)
+
+No manual setup needed — the DLQs, alarms, and `DlqRedriveLambda` are all created by
+the CDK stack. After investigating and fixing whatever caused a batch of extraction or
+embedding failures (check the DLQ depth alarm/dashboard widget, then that Lambda's
+CloudWatch Logs for the actual error), redrive manually:
+
+```
+aws lambda invoke --function-name <DlqRedriveLambda's name from the stack outputs> \
+  --payload '{"target": "both", "max_messages": 10}' --cli-binary-format raw-in-base64-out \
+  response.json
+cat response.json
+```
+
+`target` can be `"extract"`, `"embed"`, or `"both"` (default). Each invocation processes
+up to `max_messages` at a time — re-run it if the DLQ depth alarm is still active
+afterward.
