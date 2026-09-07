@@ -34,6 +34,7 @@ LAMBDAS_DIR = REPO_ROOT / "lambdas"
 LAYER_BUILD_ROOT = Path(__file__).resolve().parent / ".layer_build"
 
 DEFAULT_BEDROCK_MODEL_ID = "anthropic.claude-3-5-sonnet-20241022-v2:0"
+DEFAULT_BEDROCK_EMBEDDING_MODEL_ID = "amazon.titan-embed-text-v2:0"
 
 
 def _pinned_version(package: str) -> str:
@@ -218,8 +219,61 @@ class JobPulseStack(Stack):
             s3.NotificationKeyFilter(prefix="raw/", suffix=".json"),
         )
 
+        # --- Embedding Lambda (PLAN.md Phase 4) ---
+        embed_lambda = _lambda.Function(
+            self,
+            "EmbedLambda",
+            runtime=_lambda.Runtime.PYTHON_3_12,
+            architecture=_lambda.Architecture.X86_64,
+            handler="handler.handler",
+            code=_lambda.Code.from_asset(str(LAMBDAS_DIR / "embed")),
+            layers=[common_layer, pydantic_layer],
+            timeout=Duration.seconds(60),
+            memory_size=512,
+            environment={"BEDROCK_EMBEDDING_MODEL_ID": DEFAULT_BEDROCK_EMBEDDING_MODEL_ID},
+        )
+        # Least privilege: read-only on structured/ (what it consumes), write-only on
+        # embeddings/ (what it produces). candidate/ needs both verbs — it's a
+        # cache-aside read-or-populate on one fixed key, not a producer/consumer split.
+        embed_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["s3:GetObject"],
+                resources=[raw_postings_bucket.arn_for_objects("structured/*")],
+            )
+        )
+        embed_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["s3:PutObject"],
+                resources=[raw_postings_bucket.arn_for_objects("embeddings/*")],
+            )
+        )
+        embed_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["s3:GetObject", "s3:PutObject"],
+                resources=[raw_postings_bucket.arn_for_objects("candidate/*")],
+            )
+        )
+        embed_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["bedrock:InvokeModel"],
+                resources=[
+                    f"arn:aws:bedrock:{self.region}::foundation-model/amazon.titan-embed*"
+                ],
+            )
+        )
+
+        # --- Event-driven trigger: new structured posting -> embed (PLAN.md Phase 4) ---
+        # Writes only to embeddings/, never back to structured/, so this can never
+        # re-trigger itself.
+        raw_postings_bucket.add_event_notification(
+            s3.EventType.OBJECT_CREATED,
+            s3n.LambdaDestination(embed_lambda),
+            s3.NotificationKeyFilter(prefix="structured/", suffix=".json"),
+        )
+
         self.raw_postings_bucket = raw_postings_bucket
         self.common_layer = common_layer
         self.pydantic_layer = pydantic_layer
         self.fetch_lambda = fetch_lambda
         self.extract_lambda = extract_lambda
+        self.embed_lambda = embed_lambda
