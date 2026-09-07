@@ -1,0 +1,2 @@
+# Lambda-specific dependencies for dlq_redrive (subset of the root requirements.txt),
+# installed into a deployment package or Lambda layer at build time.

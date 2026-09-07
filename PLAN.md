@@ -1,0 +1,204 @@
+# JobPulse — Implementation Plan
+
+Source spec: `Docs/JobPulse_Project_Spec.pdf`
+
+This plan sequences the build so every technology in the spec's tech stack and every
+feature (core + all advanced extensions in section 5, not just a subset) gets implemented.
+Phases are ordered so each one produces something runnable before the next begins.
+
+Scope: Phases 0–11 (the full core pipeline) plus exactly three advanced features —
+SQS Dead-Letter Queue + retry logic (§5.1), SHAP explainability (§5.2), and skill-gap
+analysis (§5.2). All other extensions from spec section 5 are out of scope.
+
+Tech checklist (everything below must appear in the final system):
+AWS Lambda (Python 3.12) · EventBridge · S3 · DynamoDB · Bedrock (Claude + Titan Embeddings) ·
+scikit-learn / XGBoost · SNS · SES · API Gateway · AWS CDK (Python) · GitHub Actions ·
+CloudWatch (Logs/Metrics/Alarms) + X-Ray · SQS (DLQ) · SHAP.
+
+---
+
+## Phase 0 — Repo & environment setup
+
+1. Set up project layout:
+   ```
+   /infra          → AWS CDK app (Python)
+   /lambdas        → one folder per Lambda (fetch, extract, embed, threshold, query_api, skill_gap, dlq_redrive)
+   /ml             → offline training scripts, notebooks, saved model artifacts
+   /tests          → unit + integration tests
+   /.github/workflows
+   ```
+2. Create a Python virtualenv (3.12) with `pip-tools` or `poetry`; pin dependencies.
+3. Configure AWS CLI profile / credentials (or GCP if you choose the GCP path in section 2's
+   "GCP equivalent") and an AWS account/region for dev.
+4. Initialize `AWS CDK` app (`cdk init app --language python`) in `/infra`. This is the IaC
+   backbone every later phase adds stacks/constructs to.
+5. Add `.gitignore` for `cdk.out/`, `.env`, model artifacts, `node_modules`.
+
+## Phase 1 — Candidate profile & data contracts
+
+1. Define the candidate profile schema (resume text, parsed sections: skills, experience,
+   projects) — this is the input the whole pipeline scores against, and must be pluggable
+   (not hardcoded to one person) per the spec's "general-purpose tool" framing.
+2. Define the structured posting schema that extraction must produce: `title, company,
+   comp_min, comp_max, seniority, required_skills[], remote_status, visa_status,
+   source_url, posting_hash, ingested_at`.
+3. Define the DynamoDB item shape (partition key `posting_id`, sort/GSI for score-ranked
+   queries) and the S3 raw-posting key convention (`raw/{source}/{date}/{posting_hash}.json`).
+
+## Phase 2 — Ingestion Lambda + EventBridge + S3 (core pipeline, stage 1)
+
+1. Write `lambdas/fetch/`: pulls new postings from a job board API or RSS feed (pick one
+   real source, e.g. RemoteOK, Adzuna, or an RSS feed, with an adapter interface so more
+   sources can be added later — this sets up **multi-source ingestion**, Phase 12).
+2. Lambda writes raw JSON responses to **S3** (`raw postings` bucket) untouched — this is
+   the audit trail / immutable landing zone.
+3. Create an **EventBridge** cron rule (e.g. `rate(6 hours)`) in CDK that triggers the fetch
+   Lambda.
+4. Deploy via `cdk deploy` and confirm a scheduled run lands raw JSON in S3.
+
+## Phase 3 — Extraction Lambda (Bedrock LLM)
+
+1. Write `lambdas/extract/`: reads a raw posting from S3 (triggered by S3 event or by the
+   fetch Lambda invoking it directly), calls **Amazon Bedrock** (Claude) with a structured
+   extraction prompt (JSON schema for title/company/comp/seniority/skills/remote/visa).
+2. Validate/repair LLM JSON output (retry once on malformed JSON).
+3. Compute `posting_hash` (content hash) before extraction to support dedup (Phase 12).
+
+## Phase 4 — Embeddings Lambda (Bedrock Titan Embeddings)
+
+1. Extend (or add a second) Lambda that embeds:
+   - The posting's extracted requirements/description text.
+   - The candidate profile (whole-resume embedding, plus per-section embeddings for
+     skills/experience/projects) — computed once and cached, not per posting.
+2. Use **Bedrock Titan Embeddings** as the embedding model.
+3. Store posting embeddings alongside the structured record.
+
+## Phase 5 — Structured store (DynamoDB)
+
+1. Create the **DynamoDB** table in CDK with the schema from Phase 1, plus a GSI for
+   querying top-scored postings.
+2. Extraction + embedding Lambdas write structured records, embeddings (as compact
+   base64/float arrays), and a placeholder score into DynamoDB.
+
+## Phase 6 — Match-scoring model (offline ML, the rigor component)
+
+1. **Baseline**: implement keyword/BM25 matching as the naive baseline (`rank_bm25` or a
+   simple TF-IDF cosine).
+2. **Embedding similarity**: cosine similarity between candidate and posting embeddings
+   (already computed in Phase 4) as the second baseline.
+3. **Labeling**: manually label 150–300 postings as good-fit / not-a-fit for a candidate
+   profile → held-out test set (`ml/labels.csv`).
+4. **Re-ranker**: engineer features (skill overlap count, seniority match, comp-range fit,
+   remote/visa match, embedding similarity) and train a classifier with **scikit-learn** /
+   **XGBoost** (logistic regression + gradient-boosted trees, compare both).
+5. Package the trained model as a **Lambda layer** (pickled/joblib model + inference code)
+   so the pipeline's scoring Lambda can load it without retraining at inference time.
+6. **Evaluation**: compute Precision@K, Recall@K, ROC-AUC for each of the three approaches
+   (keyword-only, embedding-only, embedding+re-ranker) and record the improvement delta in
+   `ml/evaluation_report.md`. This produces the resume-bullet numbers from the spec.
+
+## Phase 7 — Scoring + threshold + alerting Lambda (core pipeline, stage 2)
+
+1. Write `lambdas/threshold/`: loads the re-ranker layer from Phase 6, scores each new
+   posting, writes the final score + `alert_sent` flag back to DynamoDB.
+2. If score clears the fit threshold, publish to **SNS**, which fans out to:
+   - **SES** for email alerts.
+   - (Later, Phase 14) an additional subscriber for Slack/Discord.
+3. Wire SNS → SES in CDK; verify a sender identity in SES sandbox for dev testing.
+
+## Phase 8 — Query API (on-demand path)
+
+1. Write `lambdas/query_api/`: reads DynamoDB (via the GSI), supports filtering
+   (min score, remote status, seniority) and returns ranked postings as JSON.
+2. Expose it through **API Gateway** (REST or HTTP API) with CDK, with an API key or
+   Cognito authorizer if you want to gate access.
+3. Smoke-test with `curl`/Postman against the deployed endpoint.
+
+## Phase 9 — Observability
+
+1. Add **CloudWatch** log groups (automatic per Lambda), structured JSON logging in every
+   Lambda (correlation id per posting).
+2. Add **CloudWatch Metrics** (custom metrics: postings ingested, extraction failures,
+   average score, alerts sent) and **CloudWatch Alarms** (error rate, DLQ depth once
+   Phase 12 exists, Lambda duration/cold-start).
+3. Enable **X-Ray** tracing on all Lambdas and API Gateway for latency breakdown across the
+   pipeline (fetch → extract → embed → score → alert).
+4. Build a CloudWatch dashboard (via CDK) summarizing pipeline health.
+
+## Phase 10 — CI/CD
+
+1. **GitHub Actions** workflow: on PR — lint (`ruff`/`flake8`), type-check, run unit tests
+   for each Lambda, run the ML evaluation script against a fixed sample and assert
+   metrics don't regress below a floor.
+2. On merge to `main` — `cdk diff` then `cdk deploy` to a dev/staging AWS account.
+3. Add a manual-approval gate (GitHub Environments) before deploying to prod.
+
+## Phase 11 — Core pipeline validation
+
+1. Run the full pipeline end-to-end on real data for several scheduled cycles.
+2. Confirm S3 audit trail, DynamoDB records, alert emails, and query API all work together.
+3. This closes out the "core capabilities" list from spec section 1. The three phases below
+   are the only additive depth in scope.
+
+---
+
+## Phase 12 — SQS Dead-Letter Queue + retry logic (spec §5.1)
+
+1. Add an **SQS** DLQ to the extraction and embedding Lambdas (via Lambda destinations, or
+   event-source-mapping/on-failure DLQ config in CDK).
+2. Configure exponential backoff retry (Lambda's built-in async retry, or a Step
+   Functions/SQS visibility-timeout-based backoff) before a failed message lands in the DLQ.
+3. Add a CloudWatch alarm on DLQ depth so failures are visible (ties back into Phase 9).
+4. Write a small redrive/reprocessing script or Lambda to replay DLQ messages after a fix.
+
+## Phase 13 — Explainability (SHAP) (spec §5.2)
+
+1. Add `shap` to the re-ranker's dependencies (Phase 6's model layer).
+2. At inference time in the threshold/scoring Lambda, compute SHAP values for the
+   re-ranker's engineered features (skill overlap, seniority match, comp-range fit,
+   remote/visa match, embedding similarity) for each scored posting.
+3. Store the top contributing features (name + SHAP value) alongside the score in
+   DynamoDB, and expose them through the query API (Phase 8) so each ranked posting shows
+   *why* it scored high instead of a black-box number.
+
+## Phase 14 — Skill-gap analysis (spec §5.2)
+
+1. Write a Lambda or scheduled script that scans DynamoDB for postings where the candidate
+   scored below the fit threshold.
+2. Aggregate `required_skills` across those low-scoring postings and rank the most
+   frequently missing skills relative to the candidate profile.
+3. Surface the ranked skill-gap list through a new query API endpoint (or a scheduled
+   report written to S3/email) as a learning recommendation.
+
+---
+
+## Phase 15 — Final validation & write-up
+
+1. Run the full system (core pipeline + DLQ/retry + SHAP explainability + skill-gap
+   analysis) end-to-end for several scheduled cycles; confirm DLQ redrive and the two ML
+   additions work against real data.
+2. Finalize `ml/evaluation_report.md` with real measured Precision@K/Recall@K/ROC-AUC
+   numbers and the baseline comparison table.
+3. Update `README.md` with architecture diagram, setup/deploy instructions, and the
+   resume-bullet framing from spec section 6 (general-purpose tool, pluggable candidate
+   profile) using your actual measured numbers.
+
+---
+
+## Coverage map (spec → phase)
+
+| Spec item | Phase |
+|---|---|
+| EventBridge, S3, Lambda fetch | 2 |
+| Bedrock LLM extraction | 3 |
+| Bedrock Titan Embeddings | 4 |
+| DynamoDB | 5 |
+| Match-scoring model, labeling, metrics | 6 |
+| SNS / SES alerting | 7 |
+| API Gateway query path | 8 |
+| CloudWatch + X-Ray | 9 |
+| CDK IaC | 0 (scaffold) + all phases |
+| GitHub Actions CI/CD | 10 |
+| SQS DLQ & retries (§5.1) | 12 |
+| Explainability / SHAP (§5.2) | 13 |
+| Skill-gap analysis (§5.2) | 14 |
