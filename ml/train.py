@@ -1,15 +1,26 @@
 """Train the re-ranker (PLAN.md Phase 6.4-5): engineered features in, a trained
-classifier out, packaged as a self-describing joblib artifact for Phase 7's threshold
-Lambda to load without retraining at inference time.
+classifier out, packaged as a self-describing joblib artifact for offline evaluation
+(ml/evaluate.py), plus a pure-Python inference JSON for Phase 7's threshold Lambda.
 
 Trains both a logistic regression and a gradient-boosted tree (XGBoost) — spec section
 3.1 asks for both, since a linear model is easy to explain in an interview while a
 boosted tree usually captures more of the feature interactions — and keeps whichever
-scores higher on the held-out test set, rather than assuming one is always better.
+scores higher on the held-out test set, rather than assuming one is always better, for
+*offline comparison and reporting*.
+
+That "best" model isn't necessarily what gets deployed, though: scikit-learn + numpy +
+scipy + xgboost together are ~345MB unzipped (verified directly — pip-downloaded the
+real manylinux wheels and measured), well past Lambda's 250MB function+layers limit.
+Rather than pay that packaging cost, only the logistic regression's fitted parameters
+(a weight per feature, plus an intercept) are exported as JSON — a Lambda can compute
+`sigmoid(dot(weights, features) + intercept)` in a few lines of stdlib Python with no ML
+library installed at all. See export_inference_json() below and
+lambdas/threshold/reranker.py for the matching runtime side.
 """
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +39,7 @@ from ml.dataset import (
 from ml.features import FEATURE_NAMES, build_feature_vector, feature_vector_to_array
 
 ARTIFACT_PATH = Path(__file__).resolve().parent / "artifacts" / "reranker.joblib"
+INFERENCE_JSON_PATH = Path(__file__).resolve().parent / "artifacts" / "reranker_inference.json"
 
 
 def build_training_arrays(
@@ -63,6 +75,24 @@ def select_best_model(
     return best_name, best_model, best_auc
 
 
+def export_inference_json(model: LogisticRegression, feature_names: list[str]) -> dict[str, Any]:
+    """A LogisticRegression's decision function is exactly `dot(coef_, x) + intercept_`
+    — extracting those fitted numbers is all a pure-Python runtime needs; it doesn't
+    need scikit-learn itself. Only implemented for logistic regression: there's no
+    equally small, equally faithful pure-Python re-implementation of an XGBoost
+    ensemble's prediction logic.
+    """
+    if not isinstance(model, LogisticRegression):
+        raise TypeError(
+            f"export_inference_json only supports LogisticRegression, got {type(model).__name__}"
+        )
+    return {
+        "weights": model.coef_[0].tolist(),
+        "intercept": float(model.intercept_[0]),
+        "feature_names": feature_names,
+    }
+
+
 def run_training(
     postings: list[Posting],
     labels: dict[str, int],
@@ -86,6 +116,7 @@ def run_training(
         "model_name": best_name,
         "model": best_model,
         "test_auc": best_auc,
+        "models": models,
         "train_size": len(train_postings),
         "test_size": len(test_postings),
     }
@@ -95,6 +126,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile-path", default=str(DEFAULT_CANDIDATE_PROFILE_PATH))
     parser.add_argument("--artifact-path", default=str(ARTIFACT_PATH))
+    parser.add_argument("--inference-json-path", default=str(INFERENCE_JSON_PATH))
     args = parser.parse_args()
 
     candidate = CandidateProfile.from_file(args.profile_path)
@@ -112,10 +144,26 @@ def main() -> None:
         },
         artifact_path,
     )
-
-    print(f"Selected model: {result['model_name']} (test ROC-AUC: {result['test_auc']:.3f})")
+    print(f"Selected model (offline comparison): {result['model_name']} (test ROC-AUC: {result['test_auc']:.3f})")
     print(f"Train/test sizes: {result['train_size']}/{result['test_size']}")
-    print(f"Saved to: {artifact_path}")
+    print(f"Saved joblib artifact to: {artifact_path}")
+
+    # Deployment always uses logistic regression, regardless of which model won the
+    # offline comparison above — see the module docstring for the package-size reason.
+    logistic_regression = result["models"]["logistic_regression"]
+    inference_json_path = Path(args.inference_json_path)
+    inference_json_path.parent.mkdir(parents=True, exist_ok=True)
+    inference_json_path.write_text(json.dumps(export_inference_json(logistic_regression, FEATURE_NAMES), indent=2))
+
+    if result["model_name"] != "logistic_regression":
+        print(
+            f"NOTE: xgboost won the offline comparison (AUC={result['test_auc']:.3f}) but is "
+            "not deployed — bundling scikit-learn+xgboost+numpy+scipy into a Lambda is "
+            "~345MB unzipped, over the 250MB function+layers limit. Deploying "
+            "logistic_regression instead. A container-image Lambda (10GB limit) would lift "
+            "this constraint if xgboost's improvement is ever worth the added complexity."
+        )
+    print(f"Saved deployable inference JSON (logistic_regression) to: {inference_json_path}")
 
 
 if __name__ == "__main__":

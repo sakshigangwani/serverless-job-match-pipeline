@@ -353,3 +353,118 @@ def test_only_the_raw_prefix_notification_remains_on_the_bucket():
         if rule["Name"] == "prefix"
     }
     assert prefixes == {"raw/"}
+
+
+def test_threshold_lambda_env_and_layers():
+    template = _synth_template()
+
+    matches = template.find_resources(
+        "AWS::Lambda::Function",
+        {
+            "Properties": {
+                "Handler": "handler.handler",
+                "Runtime": "python3.12",
+                "Environment": {
+                    "Variables": {"FIT_THRESHOLD": assertions.Match.any_value()}
+                },
+            }
+        },
+    )
+
+    assert len(matches) == 1
+    (resource,) = matches.values()
+    assert len(resource["Properties"]["Layers"]) == 2
+
+
+def test_threshold_lambda_role_only_updates_dynamodb_and_publishes_to_sns():
+    template = _synth_template()
+
+    template.has_resource_properties(
+        "AWS::IAM::Policy",
+        {
+            "PolicyDocument": {
+                "Statement": assertions.Match.array_with(
+                    [
+                        assertions.Match.object_like(
+                            {"Action": "dynamodb:UpdateItem", "Effect": "Allow"}
+                        ),
+                        assertions.Match.object_like(
+                            {"Action": "sns:Publish", "Effect": "Allow"}
+                        ),
+                    ]
+                )
+            }
+        },
+    )
+
+
+def test_threshold_dynamodb_trigger_fires_only_after_embedding_before_scoring():
+    template = _synth_template()
+
+    template.has_resource_properties(
+        "AWS::Lambda::EventSourceMapping",
+        {
+            "StartingPosition": "LATEST",
+            "FilterCriteria": {
+                "Filters": [
+                    {
+                        "Pattern": (
+                            '{"eventName":["MODIFY"],"dynamodb":{"NewImage":'
+                            '{"embedding":{"B":[{"exists":true}]},'
+                            '"score":{"NULL":[true]}}}}'
+                        )
+                    }
+                ]
+            },
+        },
+    )
+
+
+def test_alerts_topic_exists_and_threshold_can_publish_to_it():
+    template = _synth_template()
+
+    template.resource_count_is("AWS::SNS::Topic", 1)
+
+
+def test_alert_email_lambda_has_no_layers_and_can_only_send_ses():
+    template = _synth_template()
+
+    matches = template.find_resources(
+        "AWS::Lambda::Function",
+        {
+            "Properties": {
+                "Handler": "handler.handler",
+                "Environment": {
+                    "Variables": {"SENDER_EMAIL": assertions.Match.any_value()}
+                },
+            }
+        },
+    )
+    assert len(matches) == 1
+    (resource,) = matches.values()
+    assert "Layers" not in resource["Properties"]
+
+    template.has_resource_properties(
+        "AWS::IAM::Policy",
+        {
+            "PolicyDocument": {
+                "Statement": assertions.Match.array_with(
+                    [
+                        assertions.Match.object_like(
+                            {
+                                "Action": ["ses:SendEmail", "ses:SendRawEmail"],
+                                "Effect": "Allow",
+                            }
+                        )
+                    ]
+                )
+            }
+        },
+    )
+
+
+def test_alert_email_lambda_is_subscribed_to_the_alerts_topic():
+    template = _synth_template()
+
+    template.resource_count_is("AWS::SNS::Subscription", 1)
+    template.has_resource_properties("AWS::SNS::Subscription", {"Protocol": "lambda"})

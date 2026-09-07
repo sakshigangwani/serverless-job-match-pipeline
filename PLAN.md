@@ -115,12 +115,23 @@ CloudWatch (Logs/Metrics/Alarms) + X-Ray · SQS (DLQ) · SHAP.
 
 ## Phase 7 — Scoring + threshold + alerting Lambda (core pipeline, stage 2)
 
-1. Write `lambdas/threshold/`: loads the re-ranker layer from Phase 6, scores each new
-   posting, writes the final score + `alert_sent` flag back to DynamoDB.
-2. If score clears the fit threshold, publish to **SNS**, which fans out to:
-   - **SES** for email alerts.
-   - (Later, Phase 14) an additional subscriber for Slack/Discord.
-3. Wire SNS → SES in CDK; verify a sender identity in SES sandbox for dev testing.
+1. Write `lambdas/threshold/`: triggered by a DynamoDB Streams MODIFY event once embed
+   has set a posting's embedding (a finer-grained filter than Phase 5's INSERT-only one,
+   since both embed's and threshold's own writes are MODIFYs — the filter keys on
+   `embedding` existing and `score` still being NULL). Scores each posting with the
+   re-ranker and writes the final score + `alert_sent` flag back to DynamoDB. The
+   re-ranker itself is deployed as a pure-Python inference module
+   (`lambdas/threshold/reranker.py` + a small exported weights/intercept JSON), not a
+   scikit-learn/xgboost Lambda layer — bundling those plus numpy/scipy measured at
+   ~345MB unzipped, over Lambda's 250MB function+layers limit (see `ml/train.py`).
+2. If score clears the fit threshold, publish to **SNS** (`AlertsTopic`), which fans out
+   to a Lambda subscriber (`lambdas/alert_email/`) that calls **SES** to send the email —
+   SNS has no native SES subscription protocol, so a small subscriber Lambda is what
+   realizes "SNS fans out to SES." This also sets up "add another subscriber later"
+   (e.g. a future Slack/Discord webhook, currently out of scope) as a free extension
+   point: it would attach to the same topic without touching either existing Lambda.
+3. Wire SNS → Lambda → SES in CDK; verify a sender identity (and, in SES sandbox, a
+   recipient identity too) in the SES console for dev testing (see `SETUP.md`).
 
 ## Phase 8 — Query API (on-demand path)
 

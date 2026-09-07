@@ -1,2 +1,5 @@
-# Lambda-specific dependencies for threshold (subset of the root requirements.txt),
-# installed into a deployment package or Lambda layer at build time.
+# boto3 ships with the Lambda runtime. common.models needs pydantic (bundled via the
+# separate PydanticLayer, see infra/jobpulse_infra/jobpulse_stack.py). ml.features is
+# pure stdlib beyond that. reranker.py is deliberately pure stdlib too — no
+# scikit-learn/xgboost at runtime; see ml/train.py's module docstring for why.
+pydantic==2.13.5

@@ -1,7 +1,13 @@
+import math
+
+import pytest
+
 from common.models import CandidateProfile
+from ml.features import FEATURE_NAMES, build_feature_vector, feature_vector_to_array
 from ml.synthetic_data import generate_dataset
 from ml.train import (
     build_training_arrays,
+    export_inference_json,
     run_training,
     select_best_model,
     train_candidate_models,
@@ -64,3 +70,38 @@ def test_run_training_is_deterministic_given_the_same_inputs():
 
     assert result_a["model_name"] == result_b["model_name"]
     assert result_a["test_auc"] == result_b["test_auc"]
+
+
+def test_run_training_exposes_both_trained_models():
+    postings, labels = generate_dataset(CANDIDATE, n=100, seed=42)
+
+    result = run_training(postings, labels, CANDIDATE)
+
+    assert set(result["models"]) == {"logistic_regression", "xgboost"}
+
+
+def test_export_inference_json_matches_the_models_own_predict_proba():
+    postings, labels = generate_dataset(CANDIDATE, n=100, seed=42)
+    X, y = build_training_arrays(postings, labels, CANDIDATE)
+    models = train_candidate_models(X, y)
+    logistic_regression = models["logistic_regression"]
+
+    exported = export_inference_json(logistic_regression, FEATURE_NAMES)
+
+    for posting in postings[:10]:
+        features = feature_vector_to_array(build_feature_vector(posting, CANDIDATE))
+        expected = logistic_regression.predict_proba([features])[0][1]
+
+        z = exported["intercept"] + sum(w * f for w, f in zip(exported["weights"], features))
+        actual = 1.0 / (1.0 + math.exp(-z))
+
+        assert actual == pytest.approx(expected, abs=1e-9)
+
+
+def test_export_inference_json_rejects_non_logistic_models():
+    postings, labels = generate_dataset(CANDIDATE, n=100, seed=42)
+    X, y = build_training_arrays(postings, labels, CANDIDATE)
+    models = train_candidate_models(X, y)
+
+    with pytest.raises(TypeError):
+        export_inference_json(models["xgboost"], FEATURE_NAMES)
