@@ -1,9 +1,9 @@
 """Scoring + threshold + alerting Lambda (PLAN.md Phase 7): triggered by a DynamoDB
 Streams MODIFY event once the embed Lambda has set a posting's embedding (the CDK event
 source filters to exactly that transition — see infra/jobpulse_infra/jobpulse_stack.py).
-Scores the posting with the trained re-ranker, writes the final score + alert_sent back
-to DynamoDB, and publishes to SNS (fanning out to SES for email) when the score clears
-the fit threshold.
+Scores the posting with the trained re-ranker, writes the final score + alert_sent + the
+top SHAP-contributing features (PLAN.md Phase 13) back to DynamoDB, and publishes to SNS
+(fanning out to SES for email) when the score clears the fit threshold.
 
 update_item here produces a further MODIFY record with a non-null `score`, which the
 same event source filter (score still NULL) excludes — so, like the embed Lambda before
@@ -19,7 +19,7 @@ from pathlib import Path
 import boto3
 from boto3.dynamodb.types import TypeDeserializer
 
-from common.dynamodb import from_dynamodb_item
+from common.dynamodb import from_dynamodb_item, to_decimal
 from common.logging_utils import get_logger, log_event
 from common.metrics import emit_metric
 from common.models import DEFAULT_CANDIDATE_PROFILE_PATH, CandidateProfile
@@ -27,11 +27,21 @@ from ml.features import build_feature_vector
 
 try:
     # Local/package-style import, used by pytest (lambdas.threshold.handler).
-    from lambdas.threshold.reranker import load_model, predict_proba
+    from lambdas.threshold.reranker import (
+        compute_shap_values,
+        load_model,
+        predict_proba,
+        top_contributing_factors,
+    )
 except ImportError:
     # AWS Lambda flattens lambdas/threshold/* into /var/task, so this is a top-level
     # sibling module there, not part of a "lambdas.threshold" package.
-    from reranker import load_model, predict_proba  # type: ignore[no-redef]
+    from reranker import (  # type: ignore[no-redef]
+        compute_shap_values,
+        load_model,
+        predict_proba,
+        top_contributing_factors,
+    )
 
 logger = get_logger(__name__)
 
@@ -57,9 +67,13 @@ def _process_record(table, sns, topic_arn: str, candidate: CandidateProfile, fit
     }
     posting = from_dynamodb_item(new_image)
 
+    model = _get_model()
     feature_vector = build_feature_vector(posting, candidate)
-    score = predict_proba(_get_model(), feature_vector)
+    score = predict_proba(model, feature_vector)
     alert_sent = score >= fit_threshold
+
+    shap_values = compute_shap_values(model, feature_vector)
+    top_factors = top_contributing_factors(shap_values)
 
     if alert_sent:
         sns.publish(
@@ -78,16 +92,29 @@ def _process_record(table, sns, topic_arn: str, candidate: CandidateProfile, fit
 
     table.update_item(
         Key={"posting_id": posting.posting_id},
-        UpdateExpression="SET score = :score, alert_sent = :alert_sent",
+        UpdateExpression="SET score = :score, alert_sent = :alert_sent, top_factors = :top_factors",
         ExpressionAttributeValues={
             ":score": Decimal(str(score)),
             ":alert_sent": alert_sent,
+            ":top_factors": to_decimal(top_factors),
         },
     )
-    log_event(logger, "scored posting", posting_id=posting.posting_id, score=score, alert_sent=alert_sent)
+    log_event(
+        logger,
+        "scored posting",
+        posting_id=posting.posting_id,
+        score=score,
+        alert_sent=alert_sent,
+        top_factors=top_factors,
+    )
     emit_metric("PostingScore", score)
     emit_metric("AlertsSent", 1 if alert_sent else 0)
-    return {"posting_id": posting.posting_id, "score": score, "alert_sent": alert_sent}
+    return {
+        "posting_id": posting.posting_id,
+        "score": score,
+        "alert_sent": alert_sent,
+        "top_factors": top_factors,
+    }
 
 
 def handler(event, context):

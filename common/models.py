@@ -82,6 +82,19 @@ class CandidateProfile(BaseModel):
         }
 
 
+class ContributingFactor(BaseModel):
+    """One engineered feature's contribution to a posting's score (PLAN.md Phase 13).
+
+    `shap_value` is in log-odds space (the re-ranker's linear decision function, before
+    the sigmoid) — see ml/train.py's `feature_means` and
+    lambdas/threshold/reranker.py's `compute_shap_values` for how it's derived. A
+    positive value pushed the score up, negative pushed it down; magnitude is how much.
+    """
+
+    feature: str
+    shap_value: float
+
+
 class Posting(BaseModel):
     """The structured record produced by extraction (PLAN.md Phase 3) and enriched by
     embedding (Phase 4) and scoring (Phase 7). Field set matches spec section 2.1's
@@ -113,6 +126,14 @@ class Posting(BaseModel):
 
     score: float | None = None
     alert_sent: bool = False
+
+    # The re-ranker's top contributing features for this posting's score (PLAN.md
+    # Phase 13), most-influential first. None until the threshold Lambda scores the
+    # posting, same lifecycle as `score` itself. Unlike `embedding` (a sibling
+    # DynamoDB-only attribute), this belongs on the model itself: the whole point of
+    # Phase 13 is to surface *why* a posting scored well through the query API (Phase
+    # 8), which serializes straight from this model.
+    top_factors: list[ContributingFactor] | None = None
 
     @model_validator(mode="after")
     def _check_comp_range(self) -> Posting:

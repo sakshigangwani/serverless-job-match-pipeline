@@ -1,12 +1,16 @@
 import math
 
+import numpy as np
 import pytest
+import shap
 
 from common.models import CandidateProfile
+from lambdas.threshold.reranker import compute_shap_values
 from ml.features import FEATURE_NAMES, build_feature_vector, feature_vector_to_array
 from ml.synthetic_data import generate_dataset
 from ml.train import (
     build_training_arrays,
+    compute_feature_means,
     export_inference_json,
     run_training,
     select_best_model,
@@ -85,8 +89,9 @@ def test_export_inference_json_matches_the_models_own_predict_proba():
     X, y = build_training_arrays(postings, labels, CANDIDATE)
     models = train_candidate_models(X, y)
     logistic_regression = models["logistic_regression"]
+    feature_means = compute_feature_means(X)
 
-    exported = export_inference_json(logistic_regression, FEATURE_NAMES)
+    exported = export_inference_json(logistic_regression, FEATURE_NAMES, feature_means)
 
     for posting in postings[:10]:
         features = feature_vector_to_array(build_feature_vector(posting, CANDIDATE))
@@ -102,6 +107,42 @@ def test_export_inference_json_rejects_non_logistic_models():
     postings, labels = generate_dataset(CANDIDATE, n=100, seed=42)
     X, y = build_training_arrays(postings, labels, CANDIDATE)
     models = train_candidate_models(X, y)
+    feature_means = compute_feature_means(X)
 
     with pytest.raises(TypeError):
-        export_inference_json(models["xgboost"], FEATURE_NAMES)
+        export_inference_json(models["xgboost"], FEATURE_NAMES, feature_means)
+
+
+def test_compute_feature_means_is_the_per_column_average():
+    X = [[1.0, 10.0], [2.0, 20.0], [3.0, 30.0]]
+
+    assert compute_feature_means(X) == [2.0, 20.0]
+
+
+def test_compute_shap_values_matches_shap_linear_explainer():
+    """Proves the pure-Python closed-form SHAP (lambdas/threshold/reranker.py) matches
+    the real `shap` library's own LinearExplainer output exactly (PLAN.md Phase 13) —
+    the same rigor as test_export_inference_json_matches_the_models_own_predict_proba
+    applied to explainability instead of the score itself. `shap` is only ever imported
+    here, offline, to prove the formula; the deployed Lambda never imports it.
+    """
+    postings, labels = generate_dataset(CANDIDATE, n=100, seed=42)
+    X, y = build_training_arrays(postings, labels, CANDIDATE)
+    models = train_candidate_models(X, y)
+    logistic_regression = models["logistic_regression"]
+    feature_means = compute_feature_means(X)
+    exported = export_inference_json(logistic_regression, FEATURE_NAMES, feature_means)
+
+    explainer = shap.LinearExplainer(
+        logistic_regression, masker=shap.maskers.Independent(np.array([feature_means]))
+    )
+
+    for posting in postings[:10]:
+        feature_vector = build_feature_vector(posting, CANDIDATE)
+        features = feature_vector_to_array(feature_vector)
+
+        expected = explainer.shap_values(np.array([features]))[0]
+        actual = compute_shap_values(exported, feature_vector)
+
+        for name, expected_value in zip(FEATURE_NAMES, expected):
+            assert actual[name] == pytest.approx(expected_value, abs=1e-6)

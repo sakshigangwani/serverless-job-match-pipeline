@@ -151,3 +151,13 @@ cat response.json
 `target` can be `"extract"`, `"embed"`, or `"both"` (default). Each invocation processes
 up to `max_messages` at a time — re-run it if the DLQ depth alarm is still active
 afterward.
+
+## Explainability (Phase 13)
+
+No manual setup needed. `python -m ml.train` (already a precondition for Phase 7's
+`cdk synth`/`cdk deploy`) now also writes each feature's training-set mean into
+`ml/artifacts/reranker_inference.json` alongside the weights/intercept — re-run it after
+pulling this change so the threshold Lambda's bundled `model.json` has `feature_means`
+before deploying. Each query API response's postings now include a `top_factors` field
+(top 3 features by `abs(shap_value)`, most-influential first) once a posting has been
+scored — nothing to configure, it rides along with `score`.
