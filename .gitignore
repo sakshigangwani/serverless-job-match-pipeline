@@ -26,3 +26,4 @@ node_modules/
 # Local-only Claude Code guidance, not published to the repo
 CLAUDE.md
 PHASE1_NOTES.md
+PHASE2_NOTES.md
