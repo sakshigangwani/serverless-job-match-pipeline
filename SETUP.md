@@ -43,3 +43,28 @@ done on your behalf:
 
 Once credentials are configured and the account is bootstrapped, Phase 1+ can start adding
 real stacks/resources to `infra/jobpulse_infra/jobpulse_stack.py`.
+
+## What you need to do manually (Phase 7 — alerting)
+
+Amazon SES starts every account in a sandbox: it will only send email **to and from
+verified identities**, and the threshold Lambda's re-ranker model must exist before you
+can even `cdk synth`/`cdk deploy` this stack. Both are things only you can do:
+
+1. Train the re-ranker so `ml/artifacts/reranker_inference.json` exists (the CDK stack
+   raises a clear error naming this file if it's missing):
+   ```
+   python -m ml.train
+   ```
+2. In the SES console (same region as the rest of the stack), verify a sender email
+   identity (the address `alert_email` sends *from*) and, while still in the SES
+   sandbox, a recipient identity too (the address you want alerts delivered *to*) —
+   sandbox accounts can't email unverified addresses at all.
+3. Override the placeholder addresses at deploy time via CDK context, e.g.:
+   ```
+   cdk deploy -c senderEmail=you-verified-sender@example.com -c recipientEmail=you-verified-recipient@example.com
+   ```
+   Left unset, the stack falls back to `alerts@example.com`/`candidate@example.com` —
+   placeholders that will never actually deliver anything.
+4. The fit threshold (`FIT_THRESHOLD`, default `0.7`) that decides when an alert fires
+   is also just a stack constant in `jobpulse_stack.py` — adjust it there if 0.7 is too
+   strict/loose once you're watching real scores come through.

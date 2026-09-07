@@ -1,0 +1,1 @@
+# boto3 (including SES) ships with the Lambda runtime. No third-party dependencies.
