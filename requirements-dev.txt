@@ -4,6 +4,8 @@
 #
 #    pip-compile --no-index --output-file=requirements-dev.txt requirements-dev.in
 #
+ast-serialize==0.10.0
+    # via mypy
 boto3==1.43.89
     # via
     #   -c requirements.txt
@@ -35,16 +37,24 @@ jmespath==1.1.0
     #   -c requirements.txt
     #   boto3
     #   botocore
+librt==0.15.0
+    # via mypy
 markupsafe==3.0.3
     # via werkzeug
 moto==5.2.3
     # via -r requirements-dev.in
+mypy==2.3.1
+    # via -r requirements-dev.in
+mypy-extensions==1.1.0
+    # via mypy
 packaging==26.3
     # via
     #   -c requirements.txt
     #   build
     #   pytest
     #   wheel
+pathspec==1.1.1
+    # via mypy
 pip-tools==7.6.1
     # via -r requirements-dev.in
 pluggy==1.6.0
@@ -81,6 +91,10 @@ six==1.17.0
     # via
     #   -c requirements.txt
     #   python-dateutil
+typing-extensions==4.16.0
+    # via
+    #   -c requirements.txt
+    #   mypy
 urllib3==2.7.0
     # via
     #   -c requirements.txt

@@ -3,4 +3,5 @@
 pytest
 moto
 ruff
+mypy
 pip-tools

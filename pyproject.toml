@@ -4,3 +4,12 @@ testpaths = ["tests"]
 
 [tool.ruff]
 extend-exclude = ["infra/jobpulse_infra/.layer_build"]
+
+[tool.mypy]
+# Scoped to common/, lambdas/, ml/ (see CI workflow) — not infra/, whose CDK constructs
+# are heavily dynamic/jsii-typed; type-checking them would mean fighting the framework
+# for little real benefit, a deliberate scope decision, not an oversight.
+ignore_missing_imports = true  # boto3/moto ship no type stubs by default
+explicit_package_bases = true  # needed for lambdas/*/handler.py's dual import pattern
+  # (both `lambdas.fetch.handler` for pytest and a flattened top-level module for the
+  # real Lambda deployment package) without a top-level lambdas/__init__.py

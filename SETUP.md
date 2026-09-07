@@ -96,3 +96,40 @@ trace — X-Ray doesn't automatically link the separate async invocations one po
 passes through across fetch/extract/embed/threshold into a single end-to-end trace, so
 use each Lambda's structured logs' `posting_id` field to correlate across stages
 instead).
+
+## What you need to do manually (Phase 10 — CI/CD)
+
+`.github/workflows/ci-cd.yml`'s `test` job runs on every PR/push with no setup needed.
+The two deploy jobs (`deploy-staging`, `deploy-production`) need real AWS accounts and
+GitHub repo configuration only you can provide — a workflow file alone can't create
+either:
+
+1. **Per environment** (once for a staging AWS account, once for a separate production
+   AWS account), set up OIDC so GitHub Actions can assume a role without long-lived
+   access keys:
+   - In each AWS account, create an IAM OIDC identity provider for
+     `token.actions.githubusercontent.com` (skip if one already exists in that account).
+   - Create an IAM role in each account trusting that provider, scoped to this repo
+     (condition on `token.actions.githubusercontent.com:sub` matching
+     `repo:<your-github-username>/serverless-job-match-pipeline:*`), with permissions
+     for whatever this stack needs to create/update (Lambda, S3, DynamoDB, SNS, SES,
+     API Gateway, IAM, CloudWatch, EventBridge, CloudFormation) — or attach
+     `AdministratorAccess` for a personal dev/staging account if you'd rather not
+     hand-scope a policy for this project.
+   - `cdk bootstrap` each account/region once (see the Phase 0 section above), using
+     credentials with sufficient privileges (this can be your own, one-time, not the
+     CI role).
+2. In this repo's **Settings -> Environments**, create two environments named exactly
+   `staging` and `production`:
+   - On each, add an environment secret `AWS_DEPLOY_ROLE_ARN` (that environment's IAM
+     role ARN from step 1) and an environment variable `AWS_REGION`. Same secret/
+     variable *names* in both environments, different *values* — the workflow
+     references `secrets.AWS_DEPLOY_ROLE_ARN`/`vars.AWS_REGION` once, and GitHub
+     resolves them from whichever environment the running job declared.
+   - On **`production` only**, add a required-reviewers protection rule (yourself, or
+     anyone else who should approve a prod deploy). This is the actual manual-approval
+     gate PLAN.md Phase 10.3 asks for — the workflow's `environment: production` line
+     only *requests* the gate; this repo setting is what *enforces* it. Without it,
+     `deploy-production` runs automatically right after `deploy-staging` succeeds.
+3. Push to `main` (or merge a PR) to trigger `deploy-staging` — `deploy-production`
+   then waits for the approval configured in step 2 before running.
