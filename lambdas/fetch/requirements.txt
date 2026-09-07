@@ -1,2 +1,3 @@
-# Lambda-specific dependencies for fetch (subset of the root requirements.txt),
-# installed into a deployment package or Lambda layer at build time.
+# No third-party pip dependencies: boto3 ships with the Lambda Python runtime, and this
+# handler only uses the stdlib (urllib, json) plus common.storage_keys (pure stdlib,
+# no pydantic) provided via the shared CommonLayer — see infra/jobpulse_infra/jobpulse_stack.py.

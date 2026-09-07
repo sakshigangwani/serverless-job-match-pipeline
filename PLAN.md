@@ -48,8 +48,9 @@ CloudWatch (Logs/Metrics/Alarms) + X-Ray · SQS (DLQ) · SHAP.
 ## Phase 2 — Ingestion Lambda + EventBridge + S3 (core pipeline, stage 1)
 
 1. Write `lambdas/fetch/`: pulls new postings from a job board API or RSS feed (pick one
-   real source, e.g. RemoteOK, Adzuna, or an RSS feed, with an adapter interface so more
-   sources can be added later — this sets up **multi-source ingestion**, Phase 12).
+   real source, e.g. RemoteOK, Adzuna, or an RSS feed) behind a small adapter interface
+   (a `JobSource` base class) so more sources could be added later without changing the
+   Lambda handler.
 2. Lambda writes raw JSON responses to **S3** (`raw postings` bucket) untouched — this is
    the audit trail / immutable landing zone.
 3. Create an **EventBridge** cron rule (e.g. `rate(6 hours)`) in CDK that triggers the fetch
