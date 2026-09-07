@@ -97,7 +97,9 @@ def test_handler_writes_structured_posting_on_first_valid_response(monkeypatch):
         assert item["remote_status"] == "remote"
         assert item["required_skills"] == ["Python", "AWS"]
         assert item["gsi_pk"] == "POSTING"
-        assert item["score"] is None
+        # Omitted, not NULL — a NULL-typed `score` on a table with `score` as a GSI
+        # sort key would make DynamoDB reject the write (see common/dynamodb.py).
+        assert "score" not in item
 
 
 def test_handler_retries_once_on_malformed_json_then_succeeds(monkeypatch):

@@ -135,11 +135,17 @@ CloudWatch (Logs/Metrics/Alarms) + X-Ray · SQS (DLQ) · SHAP.
 
 ## Phase 8 — Query API (on-demand path)
 
-1. Write `lambdas/query_api/`: reads DynamoDB (via the GSI), supports filtering
-   (min score, remote status, seniority) and returns ranked postings as JSON.
-2. Expose it through **API Gateway** (REST or HTTP API) with CDK, with an API key or
-   Cognito authorizer if you want to gate access.
-3. Smoke-test with `curl`/Postman against the deployed endpoint.
+1. Write `lambdas/query_api/`: reads the ScoreIndex GSI (score descending, so only
+   already-scored postings ever appear), supports filtering (`min_score`,
+   `remote_status`, `seniority`) and pagination-aware limiting (DynamoDB's
+   `FilterExpression` applies after `Limit`, so filtered results page with
+   `LastEvaluatedKey` until the requested count is reached), and returns ranked
+   postings as JSON.
+2. Expose it through **API Gateway** — a REST API specifically (not the newer HTTP
+   API), since REST API has native API key + usage plan support for simple access
+   gating; a Cognito authorizer was the spec's other option but is unnecessary
+   overhead for a single-candidate demo API.
+3. Smoke-test with `curl`/Postman against the deployed endpoint (see `SETUP.md`).
 
 ## Phase 9 — Observability
 

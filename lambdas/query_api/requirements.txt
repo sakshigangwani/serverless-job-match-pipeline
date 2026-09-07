@@ -1,2 +1,4 @@
-# Lambda-specific dependencies for query_api (subset of the root requirements.txt),
-# installed into a deployment package or Lambda layer at build time.
+# boto3 ships with the Lambda runtime. common.dynamodb (and its common.models
+# dependency) needs pydantic — bundled via the separate PydanticLayer, see
+# infra/jobpulse_infra/jobpulse_stack.py.
+pydantic==2.13.5

@@ -11,9 +11,13 @@ Key schema:
   Querying this GSI with ScanIndexForward=False returns postings ranked highest-score-first
   without a table scan — this is what the query API (Phase 8) and skill-gap analysis
   (Phase 14) rely on. A posting without a `score` yet (before Phase 7 runs) is simply
-  absent from this GSI — DynamoDB excludes items missing a scalar-typed GSI key attribute
-  from that index rather than erroring, which is exactly the "not ready to rank yet"
-  behavior this pipeline wants.
+  absent from this GSI — but only because `to_dynamodb_item` *omits* the `score` key
+  entirely when it's None, rather than writing it as DynamoDB's NULL type. DynamoDB
+  excludes an item missing a GSI key attribute from that index, but if the attribute is
+  *present* with an incompatible type (NULL is not a valid key type), PutItem/UpdateItem
+  is rejected outright with a ValidationException — verified directly against a table
+  with the real GSI defined, not assumed. Omission, not NULL, is what "not ready to
+  rank yet" actually requires.
 
 `embedding` (see pack_embedding/unpack_embedding) is a sibling item attribute, not a
 Posting field — it isn't valid JSON-round-trippable binary data, so it's kept out of the
@@ -43,12 +47,18 @@ _DECIMAL_FIELDS = ("score", "embedding_similarity")
 
 
 def to_dynamodb_item(posting: Posting) -> dict[str, Any]:
-    """Convert a Posting into a DynamoDB-ready item (Decimal scores, ISO-8601 timestamps)."""
+    """Convert a Posting into a DynamoDB-ready item (Decimal scores, ISO-8601 timestamps).
+
+    `score`/`embedding_similarity` are omitted entirely when None, not written as
+    DynamoDB NULL — `score` is a GSI sort key, and a NULL-typed value there makes
+    DynamoDB reject the write, not just skip indexing it (see module docstring).
+    """
     item: dict[str, Any] = posting.model_dump(mode="python")
     item["ingested_at"] = posting.ingested_at.isoformat()
     for field in _DECIMAL_FIELDS:
-        value = item[field]
-        item[field] = Decimal(str(value)) if value is not None else None
+        value = item.pop(field)
+        if value is not None:
+            item[field] = Decimal(str(value))
     item[GSI_PARTITION_KEY] = GSI_PARTITION_VALUE
     return item
 

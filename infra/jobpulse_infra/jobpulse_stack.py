@@ -10,6 +10,9 @@ from aws_cdk import (
     Stack,
 )
 from aws_cdk import (
+    aws_apigateway as apigateway,
+)
+from aws_cdk import (
     aws_dynamodb as dynamodb,
 )
 from aws_cdk import (
@@ -475,6 +478,51 @@ class JobPulseStack(Stack):
         )
         alerts_topic.add_subscription(sns_subscriptions.LambdaSubscription(alert_email_lambda))
 
+        # --- Query API Lambda (PLAN.md Phase 8.1) ---
+        query_api_lambda = _lambda.Function(
+            self,
+            "QueryApiLambda",
+            runtime=_lambda.Runtime.PYTHON_3_12,
+            architecture=_lambda.Architecture.X86_64,
+            handler="handler.handler",
+            code=_lambda.Code.from_asset(str(LAMBDAS_DIR / "query_api")),
+            layers=[common_layer, pydantic_layer],
+            timeout=Duration.seconds(10),
+            memory_size=256,
+            environment={"POSTINGS_TABLE_NAME": postings_table.table_name},
+        )
+        # Read-only, and only the one action this Lambda actually calls — not
+        # grant_read_data()'s broader GetItem/Scan/BatchGetItem/etc. set. The GSI's
+        # items are addressed via "{table_arn}/index/*", a separate resource from the
+        # base table for IAM purposes even though it's the same physical table.
+        query_api_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["dynamodb:Query"],
+                resources=[postings_table.table_arn, f"{postings_table.table_arn}/index/*"],
+            )
+        )
+
+        # --- API Gateway (PLAN.md Phase 8.2) ---
+        # REST API (not the newer HTTP API) specifically because it has native API key
+        # + usage plan support for simple access gating — HTTP API doesn't. A Cognito
+        # authorizer would be the heavier alternative the spec also allows; unnecessary
+        # for a single-candidate demo API.
+        query_api = apigateway.LambdaRestApi(
+            self,
+            "QueryApi",
+            handler=query_api_lambda,
+            proxy=True,
+            default_method_options=apigateway.MethodOptions(api_key_required=True),
+        )
+        query_api_key = query_api.add_api_key("QueryApiKey")
+        usage_plan = query_api.add_usage_plan(
+            "QueryApiUsagePlan",
+            api_stages=[
+                apigateway.UsagePlanPerApiStage(api=query_api, stage=query_api.deployment_stage)
+            ],
+        )
+        usage_plan.add_api_key(query_api_key)
+
         self.raw_postings_bucket = raw_postings_bucket
         self.postings_table = postings_table
         self.common_layer = common_layer
@@ -485,3 +533,5 @@ class JobPulseStack(Stack):
         self.alerts_topic = alerts_topic
         self.threshold_lambda = threshold_lambda
         self.alert_email_lambda = alert_email_lambda
+        self.query_api_lambda = query_api_lambda
+        self.query_api = query_api
