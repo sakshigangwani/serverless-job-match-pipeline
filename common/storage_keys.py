@@ -28,3 +28,17 @@ def raw_posting_key(source: str, when: date | datetime | str, posting_hash: str)
     else:
         date_str = when
     return f"raw/{source}/{date_str}/{posting_hash}.json"
+
+
+def structured_posting_key(source: str, when: date | datetime | str, posting_hash: str) -> str:
+    """Build the extraction Lambda's output key: structured/{source}/{date}/{posting_hash}.json
+
+    Interim persistence for the extracted Posting record, mirroring the raw/ convention.
+    Phase 5 introduces DynamoDB as the real structured store; until then this S3 prefix
+    lets extraction (Phase 3) be built, deployed, and tested independently.
+    """
+    if isinstance(when, (date, datetime)):
+        date_str = when.strftime("%Y-%m-%d")
+    else:
+        date_str = when
+    return f"structured/{source}/{date_str}/{posting_hash}.json"

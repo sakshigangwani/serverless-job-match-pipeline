@@ -59,11 +59,12 @@ CloudWatch (Logs/Metrics/Alarms) + X-Ray · SQS (DLQ) · SHAP.
 
 ## Phase 3 — Extraction Lambda (Bedrock LLM)
 
-1. Write `lambdas/extract/`: reads a raw posting from S3 (triggered by S3 event or by the
-   fetch Lambda invoking it directly), calls **Amazon Bedrock** (Claude) with a structured
-   extraction prompt (JSON schema for title/company/comp/seniority/skills/remote/visa).
-2. Validate/repair LLM JSON output (retry once on malformed JSON).
-3. Compute `posting_hash` (content hash) before extraction to support dedup (Phase 12).
+1. Write `lambdas/extract/`: triggered by an S3 `ObjectCreated` event under `raw/`, calls
+   **Amazon Bedrock** (Claude) with a structured extraction prompt (JSON schema for
+   title/company/comp/seniority/skills/remote/visa).
+2. Validate/repair LLM JSON output (retry once on malformed JSON or a schema violation).
+3. Reuse the `posting_hash` already computed by the fetch Lambda (Phase 2) as the
+   `posting_id`, so dedup (Phase 12) works off one consistent identity.
 
 ## Phase 4 — Embeddings Lambda (Bedrock Titan Embeddings)
 

@@ -1,2 +1,4 @@
-# Lambda-specific dependencies for extract (subset of the root requirements.txt),
-# installed into a deployment package or Lambda layer at build time.
+# boto3 ships with the Lambda runtime. common.models needs pydantic, which is not pure
+# Python (pydantic-core is a compiled extension) — bundled via the separate PydanticLayer
+# in infra/jobpulse_infra/jobpulse_stack.py rather than pip-installed into this zip.
+pydantic==2.13.5
