@@ -25,6 +25,7 @@ MODEL = {
         "visa_match",
         "embedding_similarity",
     ],
+    "feature_means": [0.0, 0.5, 0.5, 0.5, 1.0, 0.5],
 }
 
 _serializer = TypeSerializer()
@@ -99,10 +100,15 @@ def test_high_score_posting_gets_scored_and_alerted(aws):
     assert result["processed"] == 1
     assert result["results"][0]["alert_sent"] is True
     assert result["results"][0]["score"] > 0.7
+    # Only embedding_similarity has a non-zero weight, so it must dominate the
+    # explanation, with a positive SHAP value (it pushed the score up).
+    assert result["results"][0]["top_factors"][0]["feature"] == "embedding_similarity"
+    assert result["results"][0]["top_factors"][0]["shap_value"] > 0
 
     item = table.get_item(Key={"posting_id": "high"})["Item"]
     assert float(item["score"]) > 0.7
     assert item["alert_sent"] is True
+    assert item["top_factors"][0]["feature"] == "embedding_similarity"
 
     messages = sqs.receive_message(QueueUrl=queue_url, WaitTimeSeconds=1).get("Messages", [])
     assert len(messages) == 1

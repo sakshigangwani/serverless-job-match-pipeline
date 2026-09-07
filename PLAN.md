@@ -227,15 +227,34 @@ CloudWatch (Logs/Metrics/Alarms) + X-Ray · SQS (DLQ) · SHAP.
    itself is untouched by embedding's failure) and synthesizing a fresh stream-event-
    shaped payload from the current item to re-invoke embedding with.
 
-## Phase 13 — Explainability (SHAP) (spec §5.2)
+## Phase 13 — Explainability (SHAP) (spec §5.2) [IMPLEMENTED]
 
-1. Add `shap` to the re-ranker's dependencies (Phase 6's model layer).
-2. At inference time in the threshold/scoring Lambda, compute SHAP values for the
-   re-ranker's engineered features (skill overlap, seniority match, comp-range fit,
-   remote/visa match, embedding similarity) for each scored posting.
-3. Store the top contributing features (name + SHAP value) alongside the score in
-   DynamoDB, and expose them through the query API (Phase 8) so each ranked posting shows
-   *why* it scored high instead of a black-box number.
+`shap` (already pinned in `requirements.in`) is used **offline only**, to prove
+correctness — never imported at Lambda runtime, for the same packaging-size reason
+`ml/train.py` deploys a pure-Python logistic regression instead of bundling
+scikit-learn (see its module docstring). For a linear model with independent features,
+SHAP values in log-odds space have an exact closed form:
+`shap_i = weight_i * (x_i - feature_means[i])`, where `feature_means` is each feature's
+training-set mean — precisely the baseline `shap.LinearExplainer` uses with a
+mean-summarized background. `tests/ml/test_train.py::test_compute_shap_values_matches_shap_linear_explainer`
+proves the two agree to `1e-6`.
+
+1. `ml/train.py`'s `compute_feature_means()` computes each feature's training-set mean
+   (pure `statistics.mean`, no numpy); `export_inference_json()` now carries
+   `feature_means` alongside `weights`/`intercept`/`feature_names` in the same
+   self-describing `reranker_inference.json` artifact — one training step, no separate
+   file to keep in sync.
+2. `lambdas/threshold/reranker.py`'s `compute_shap_values()` implements the closed-form
+   formula above; `top_contributing_factors()` ranks by `abs(shap_value)` descending and
+   keeps the top 3. `lambdas/threshold/handler.py` computes both alongside the score and
+   writes `top_factors` back to DynamoDB in the same `update_item` call.
+3. `top_factors: list[ContributingFactor] | None` is a first-class `Posting` field (not
+   a sibling DynamoDB-only attribute like `embedding`) precisely because the point is to
+   surface it to a consumer — `common/dynamodb.py`'s new `to_decimal`/`from_decimal`
+   recurse into the nested list-of-maps shape (DynamoDB rejects native floats anywhere
+   in an item, including nested). Because the query API (Phase 8) already round-trips
+   through `from_dynamodb_item(item).model_dump_json()`, `top_factors` appears in API
+   responses with zero changes to `lambdas/query_api/handler.py`.
 
 ## Phase 14 — Skill-gap analysis (spec §5.2)
 

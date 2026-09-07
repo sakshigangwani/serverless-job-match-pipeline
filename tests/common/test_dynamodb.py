@@ -19,7 +19,7 @@ from common.dynamodb import (
     to_dynamodb_item,
     unpack_embedding,
 )
-from common.models import Posting
+from common.models import ContributingFactor, Posting
 
 
 def _sample_posting(**overrides) -> Posting:
@@ -134,6 +134,40 @@ def test_unpack_embedding_accepts_raw_bytes_not_just_binary_wrapper():
     restored = unpack_embedding(bytes(packed))
 
     assert restored == pytest.approx([1.0, 2.0])
+
+
+def test_to_item_converts_top_factors_shap_values_to_decimal():
+    posting = _sample_posting(
+        top_factors=[
+            ContributingFactor(feature="skill_overlap_count", shap_value=0.42),
+            ContributingFactor(feature="remote_match", shap_value=-0.1),
+        ]
+    )
+
+    item = to_dynamodb_item(posting)
+
+    assert item["top_factors"] == [
+        {"feature": "skill_overlap_count", "shap_value": Decimal("0.42")},
+        {"feature": "remote_match", "shap_value": Decimal("-0.1")},
+    ]
+    assert all(isinstance(entry["shap_value"], Decimal) for entry in item["top_factors"])
+
+
+def test_to_item_omits_top_factors_key_entirely_when_none():
+    item = to_dynamodb_item(_sample_posting(top_factors=None))
+
+    assert "top_factors" not in item
+
+
+def test_item_round_trip_preserves_top_factors():
+    original = _sample_posting(
+        top_factors=[ContributingFactor(feature="embedding_similarity", shap_value=1.23456)]
+    )
+
+    restored = from_dynamodb_item(to_dynamodb_item(original))
+
+    assert restored == original
+    assert isinstance(restored.top_factors[0].shap_value, float)
 
 
 def test_unscored_posting_can_actually_be_put_into_a_table_with_the_real_gsi():

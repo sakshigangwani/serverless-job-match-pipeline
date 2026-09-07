@@ -16,11 +16,20 @@ Rather than pay that packaging cost, only the logistic regression's fitted param
 `sigmoid(dot(weights, features) + intercept)` in a few lines of stdlib Python with no ML
 library installed at all. See export_inference_json() below and
 lambdas/threshold/reranker.py for the matching runtime side.
+
+The same reasoning applies to Phase 13's SHAP explainability: the real `shap` library
+depends on numpy (and more, depending on the explainer) — instead of bundling it into
+the Lambda, export_inference_json also carries each feature's training-set mean
+(compute_feature_means), which is exactly the baseline `shap.LinearExplainer` uses for a
+linear model, letting the Lambda compute exact (not sampled/approximated) SHAP values
+itself with `weight_i * (x_i - feature_means[i])`. `shap` itself is only ever imported
+offline, to prove that formula matches (tests/ml/test_train.py).
 """
 from __future__ import annotations
 
 import argparse
 import json
+import statistics
 from pathlib import Path
 from typing import Any
 
@@ -75,12 +84,31 @@ def select_best_model(
     return best_name, best_model, best_auc
 
 
-def export_inference_json(model: LogisticRegression, feature_names: list[str]) -> dict[str, Any]:
+def compute_feature_means(X_train: list[list[float]]) -> list[float]:
+    """Per-feature mean over the training set — the SHAP baseline (PLAN.md Phase 13):
+    for a linear model with independent features, SHAP's "expected value" reference is
+    exactly the background dataset's mean, so `shap.LinearExplainer`'s default output
+    (with a mean-summarized background) matches `weight_i * (x_i - feature_means[i])`
+    (see lambdas/threshold/reranker.compute_shap_values). Plain stdlib `statistics.mean`
+    rather than numpy — X_train is already a plain list of lists here, and this is a
+    training-time-only computation, so there's no runtime-packaging reason to pull numpy
+    in just for this.
+    """
+    return [statistics.mean(column) for column in zip(*X_train)]
+
+
+def export_inference_json(
+    model: LogisticRegression, feature_names: list[str], feature_means: list[float]
+) -> dict[str, Any]:
     """A LogisticRegression's decision function is exactly `dot(coef_, x) + intercept_`
     — extracting those fitted numbers is all a pure-Python runtime needs; it doesn't
     need scikit-learn itself. Only implemented for logistic regression: there's no
     equally small, equally faithful pure-Python re-implementation of an XGBoost
     ensemble's prediction logic.
+
+    `feature_means` (see compute_feature_means) rides along in the same self-describing
+    artifact so the threshold Lambda can compute SHAP values with no separate file and
+    no risk of the baseline drifting out of sync with these weights.
     """
     if not isinstance(model, LogisticRegression):
         raise TypeError(
@@ -90,6 +118,7 @@ def export_inference_json(model: LogisticRegression, feature_names: list[str]) -
         "weights": model.coef_[0].tolist(),
         "intercept": float(model.intercept_[0]),
         "feature_names": feature_names,
+        "feature_means": feature_means,
     }
 
 
@@ -119,6 +148,7 @@ def run_training(
         "models": models,
         "train_size": len(train_postings),
         "test_size": len(test_postings),
+        "X_train": X_train,
     }
 
 
@@ -151,9 +181,12 @@ def main() -> None:
     # Deployment always uses logistic regression, regardless of which model won the
     # offline comparison above — see the module docstring for the package-size reason.
     logistic_regression = result["models"]["logistic_regression"]
+    feature_means = compute_feature_means(result["X_train"])
     inference_json_path = Path(args.inference_json_path)
     inference_json_path.parent.mkdir(parents=True, exist_ok=True)
-    inference_json_path.write_text(json.dumps(export_inference_json(logistic_regression, FEATURE_NAMES), indent=2))
+    inference_json_path.write_text(
+        json.dumps(export_inference_json(logistic_regression, FEATURE_NAMES, feature_means), indent=2)
+    )
 
     if result["model_name"] != "logistic_regression":
         print(

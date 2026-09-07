@@ -44,6 +44,33 @@ EMBEDDING_ATTRIBUTE = "embedding"
 
 
 _DECIMAL_FIELDS = ("score", "embedding_similarity")
+_NESTED_DECIMAL_FIELDS = ("top_factors",)
+
+
+def to_decimal(value: Any) -> Any:
+    """Recursively convert Python floats to Decimal (DynamoDB accepts no native float,
+    including nested inside lists/maps). Used directly for `top_factors` (a list of
+    maps, unlike the flat `_DECIMAL_FIELDS`) and for any other Lambda building a partial
+    `update_item` payload containing nested float data (PLAN.md Phase 13).
+    """
+    if isinstance(value, float):
+        return Decimal(str(value))
+    if isinstance(value, list):
+        return [to_decimal(v) for v in value]
+    if isinstance(value, dict):
+        return {k: to_decimal(v) for k, v in value.items()}
+    return value
+
+
+def from_decimal(value: Any) -> Any:
+    """Inverse of to_decimal."""
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, list):
+        return [from_decimal(v) for v in value]
+    if isinstance(value, dict):
+        return {k: from_decimal(v) for k, v in value.items()}
+    return value
 
 
 def to_dynamodb_item(posting: Posting) -> dict[str, Any]:
@@ -52,6 +79,8 @@ def to_dynamodb_item(posting: Posting) -> dict[str, Any]:
     `score`/`embedding_similarity` are omitted entirely when None, not written as
     DynamoDB NULL — `score` is a GSI sort key, and a NULL-typed value there makes
     DynamoDB reject the write, not just skip indexing it (see module docstring).
+    `top_factors` isn't a GSI key, but is omitted when None too for the same tidy
+    "only real data present" item shape.
     """
     item: dict[str, Any] = posting.model_dump(mode="python")
     item["ingested_at"] = posting.ingested_at.isoformat()
@@ -59,6 +88,10 @@ def to_dynamodb_item(posting: Posting) -> dict[str, Any]:
         value = item.pop(field)
         if value is not None:
             item[field] = Decimal(str(value))
+    for field in _NESTED_DECIMAL_FIELDS:
+        value = item.pop(field)
+        if value is not None:
+            item[field] = to_decimal(value)
     item[GSI_PARTITION_KEY] = GSI_PARTITION_VALUE
     return item
 
@@ -71,6 +104,9 @@ def from_dynamodb_item(item: dict[str, Any]) -> Posting:
     for field in _DECIMAL_FIELDS:
         if isinstance(data.get(field), Decimal):
             data[field] = float(data[field])
+    for field in _NESTED_DECIMAL_FIELDS:
+        if data.get(field) is not None:
+            data[field] = from_decimal(data[field])
     return Posting.model_validate(data)
 
 
