@@ -564,6 +564,43 @@ class JobPulseStack(Stack):
         )
         usage_plan.add_api_key(query_api_key)
 
+        # --- Skill-gap analysis Lambda (PLAN.md Phase 14) ---
+        skill_gap_lambda = _lambda.Function(
+            self,
+            "SkillGapLambda",
+            runtime=_lambda.Runtime.PYTHON_3_12,
+            architecture=_lambda.Architecture.X86_64,
+            handler="handler.handler",
+            code=_lambda.Code.from_asset(str(LAMBDAS_DIR / "skill_gap")),
+            layers=[common_layer, pydantic_layer],
+            timeout=Duration.seconds(15),
+            memory_size=256,
+            tracing=_lambda.Tracing.ACTIVE,
+            environment={
+                "POSTINGS_TABLE_NAME": postings_table.table_name,
+                "FIT_THRESHOLD": DEFAULT_FIT_THRESHOLD,
+            },
+        )
+        # Read-only Query, same minimal grant as query_api_lambda above.
+        skill_gap_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["dynamodb:Query"],
+                resources=[postings_table.table_arn, f"{postings_table.table_arn}/index/*"],
+            )
+        )
+        # A `/skill-gap` resource on the *same* REST API/stage/API-key as query_api,
+        # rather than a second API Gateway — one API for the candidate to point at, one
+        # usage plan to manage. A concrete child resource under root takes precedence
+        # over the `{proxy+}` catch-all query_api's `proxy=True` already registered
+        # there, so this doesn't shadow or conflict with query_api's own root/proxy
+        # routes.
+        skill_gap_resource = query_api.root.add_resource("skill-gap")
+        skill_gap_resource.add_method(
+            "GET",
+            apigateway.LambdaIntegration(skill_gap_lambda),
+            api_key_required=True,
+        )
+
         # --- DLQ redrive Lambda (PLAN.md Phase 12.4) ---
         # Manually invoked (never triggered automatically) after investigating and
         # fixing whatever caused failures — see lambdas/dlq_redrive/handler.py's
@@ -610,6 +647,7 @@ class JobPulseStack(Stack):
             "Threshold": (threshold_lambda, threshold_lambda.timeout),
             "AlertEmail": (alert_email_lambda, alert_email_lambda.timeout),
             "QueryApi": (query_api_lambda, query_api_lambda.timeout),
+            "SkillGap": (skill_gap_lambda, skill_gap_lambda.timeout),
         }
 
         def add_lambda_alarms(fn: _lambda.Function, id_prefix: str, timeout: Duration) -> None:

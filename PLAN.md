@@ -256,14 +256,29 @@ proves the two agree to `1e-6`.
    through `from_dynamodb_item(item).model_dump_json()`, `top_factors` appears in API
    responses with zero changes to `lambdas/query_api/handler.py`.
 
-## Phase 14 — Skill-gap analysis (spec §5.2)
+## Phase 14 — Skill-gap analysis (spec §5.2) [IMPLEMENTED]
 
-1. Write a Lambda or scheduled script that scans DynamoDB for postings where the candidate
-   scored below the fit threshold.
-2. Aggregate `required_skills` across those low-scoring postings and rank the most
-   frequently missing skills relative to the candidate profile.
-3. Surface the ranked skill-gap list through a new query API endpoint (or a scheduled
-   report written to S3/email) as a learning recommendation.
+A dedicated Lambda (`lambdas/skill_gap`), not a script bolted onto an existing one — it's
+a genuinely separate concern (a learning recommendation, not a match score) with its own
+IAM grant and its own API Gateway route, `GET /skill-gap`, added as a sibling resource on
+the *same* REST API/API-key/usage-plan `query_api` (Phase 8) already created rather than
+standing up a second API. A concrete child resource under root takes precedence over
+`query_api`'s `{proxy+}` catch-all, so the two coexist without conflict — verified
+directly in the synthesized template, not assumed.
+
+1. `_query_low_scoring_postings()` queries the same `ScoreIndex` GSI `query_api` reads
+   (PLAN.md Phase 1), filtered to `score < FIT_THRESHOLD` (the same threshold
+   `lambdas/threshold` uses to decide whether to alert), paged to completion via
+   `LastEvaluatedKey` — unlike `query_api`'s page-until-`limit` loop, this needs the
+   *entire* low-scoring population to count accurately, not a capped sample of it.
+2. `compute_skill_gaps()` counts, case-insensitively (matching
+   `ml/features.py::skill_overlap_count`'s comparison), how often each of those
+   postings' `required_skills` is a skill the candidate's profile doesn't list — ranked
+   most-frequent-first, alphabetically tie-broken for determinism.
+3. `GET /skill-gap?limit=N` (same API key as `query_api`, `limit` capped/defaulted
+   exactly like Phase 8's) returns `{"skill_gaps": [{"skill", "missing_count"}, ...],
+   "analyzed_postings": N}` — a ranked learning-recommendation list, not a scheduled
+   report, since the data is cheap enough to compute on demand from the GSI.
 
 ---
 
