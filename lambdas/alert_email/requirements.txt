@@ -1,1 +1,3 @@
-# boto3 (including SES) ships with the Lambda runtime. No third-party dependencies.
+# boto3 (including SES) ships with the Lambda runtime. common.logging_utils and
+# common.metrics are pure stdlib (no pydantic import triggered), so this Lambda
+# attaches CommonLayer only — not the heavier PydanticLayer.

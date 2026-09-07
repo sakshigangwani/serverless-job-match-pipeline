@@ -10,13 +10,14 @@ without touching this Lambda or the threshold Lambda at all.
 from __future__ import annotations
 
 import json
-import logging
 import os
 
 import boto3
 
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
+from common.logging_utils import get_logger, log_event
+from common.metrics import emit_metric
+
+logger = get_logger(__name__)
 
 
 def _format_email_body(alert: dict) -> str:
@@ -39,6 +40,7 @@ def _process_record(ses, sender: str, recipient: str, record: dict) -> str:
             "Body": {"Text": {"Data": _format_email_body(alert)}},
         },
     )
+    log_event(logger, "sent alert email", posting_id=alert["posting_id"])
     return alert["posting_id"]
 
 
@@ -51,5 +53,6 @@ def handler(event, context):
     sent = [_process_record(ses, sender, recipient, record) for record in event.get("Records", [])]
 
     result = {"emails_sent": len(sent), "posting_ids": sent}
-    logger.info(json.dumps(result))
+    log_event(logger, "alert email batch complete", **result)
+    emit_metric("EmailsSent", len(sent))
     return result

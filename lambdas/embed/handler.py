@@ -13,7 +13,6 @@ this Lambda was S3-triggered.
 from __future__ import annotations
 
 import json
-import logging
 import os
 from decimal import Decimal
 
@@ -21,6 +20,7 @@ import boto3
 from boto3.dynamodb.types import TypeDeserializer
 
 from common.dynamodb import from_dynamodb_item, pack_embedding
+from common.logging_utils import get_logger, log_event
 from common.models import DEFAULT_CANDIDATE_PROFILE_PATH, CandidateProfile
 from common.similarity import cosine_similarity
 from common.storage_keys import CANDIDATE_EMBEDDINGS_KEY
@@ -33,8 +33,7 @@ except ImportError:
     # sibling module there, not part of a "lambdas.embed" package.
     from bedrock_embeddings import embed_text  # type: ignore[no-redef]
 
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
+logger = get_logger(__name__)
 
 _deserializer = TypeDeserializer()
 
@@ -96,6 +95,7 @@ def _process_record(s3, bedrock_runtime, table, model_id: str, bucket: str, stre
             ":similarity": Decimal(str(similarity)) if similarity is not None else None,
         },
     )
+    log_event(logger, "embedded posting", posting_id=posting.posting_id, embedding_similarity=similarity)
     return posting.posting_id
 
 
@@ -119,5 +119,5 @@ def handler(event, context):
         updated.append(_process_record(s3, bedrock_runtime, table, model_id, bucket, record, profile_path))
 
     result = {"processed": len(updated), "posting_ids": updated}
-    logger.info(json.dumps(result))
+    log_event(logger, "embedding batch complete", **result)
     return result

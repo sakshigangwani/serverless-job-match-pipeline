@@ -84,3 +84,15 @@ curl -H "x-api-key: $API_KEY" "https://<api-id>.execute-api.<region>.amazonaws.c
 Expect `{"postings": [...], "count": N}` on success, `{"error": "..."}` with a 400
 status for a malformed query param (e.g. non-numeric `min_score`), and a 403 from API
 Gateway itself (before the Lambda even runs) if `x-api-key` is missing or wrong.
+
+## Viewing observability (Phase 9)
+
+No manual setup needed — CloudWatch and X-Ray are enabled entirely by the CDK stack.
+After `cdk deploy`, the dashboard is in the CloudWatch console under **Dashboards ->
+JobPulse-Pipeline**; per-Lambda structured logs (with `posting_id` correlation) are in
+each Lambda's own log group (**CloudWatch -> Log groups -> /aws/lambda/&lt;function
+name&gt;**); traces are under **X-Ray -> Traces** (each Lambda invocation is its own
+trace — X-Ray doesn't automatically link the separate async invocations one posting
+passes through across fetch/extract/embed/threshold into a single end-to-end trace, so
+use each Lambda's structured logs' `posting_id` field to correlate across stages
+instead).

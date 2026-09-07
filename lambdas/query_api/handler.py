@@ -7,7 +7,6 @@ never in this GSI at all, so every result here has already cleared extraction+em
 from __future__ import annotations
 
 import json
-import logging
 import os
 from decimal import Decimal, InvalidOperation
 
@@ -21,9 +20,9 @@ from common.dynamodb import (
     GSI_SORT_KEY,
     from_dynamodb_item,
 )
+from common.logging_utils import get_logger, log_event
 
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
+logger = get_logger(__name__)
 
 DEFAULT_LIMIT = 20
 MAX_LIMIT = 100
@@ -120,7 +119,7 @@ def handler(event, context):
     postings = [json.loads(from_dynamodb_item(item).model_dump_json()) for item in items]
 
     result = {"postings": postings, "count": len(postings)}
-    logger.info(json.dumps({"count": len(postings), "filters": params}))
+    log_event(logger, "query served", count=len(postings), filters=params)
     return {
         "statusCode": 200,
         "headers": {"Content-Type": "application/json"},
