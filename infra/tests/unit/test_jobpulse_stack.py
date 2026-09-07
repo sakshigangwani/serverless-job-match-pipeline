@@ -358,6 +358,8 @@ def test_only_the_raw_prefix_notification_remains_on_the_bucket():
 def test_threshold_lambda_env_and_layers():
     template = _synth_template()
 
+    # ALERTS_TOPIC_ARN, not FIT_THRESHOLD, disambiguates threshold_lambda: skill_gap_lambda
+    # (Phase 14) also reads FIT_THRESHOLD, but only threshold_lambda publishes alerts.
     matches = template.find_resources(
         "AWS::Lambda::Function",
         {
@@ -365,7 +367,7 @@ def test_threshold_lambda_env_and_layers():
                 "Handler": "handler.handler",
                 "Runtime": "python3.12",
                 "Environment": {
-                    "Variables": {"FIT_THRESHOLD": assertions.Match.any_value()}
+                    "Variables": {"ALERTS_TOPIC_ARN": assertions.Match.any_value()}
                 },
             }
         },
@@ -527,16 +529,82 @@ def test_query_api_requires_an_api_key():
     assert all(m["Properties"]["ApiKeyRequired"] is True for m in matches.values())
 
 
+def test_skill_gap_lambda_env_and_layers():
+    template = _synth_template()
+
+    matches = template.find_resources(
+        "AWS::Lambda::Function",
+        {
+            "Properties": {
+                "Handler": "handler.handler",
+                "Environment": {
+                    "Variables": assertions.Match.exact(
+                        {
+                            "POSTINGS_TABLE_NAME": assertions.Match.any_value(),
+                            "FIT_THRESHOLD": assertions.Match.any_value(),
+                        }
+                    )
+                },
+            }
+        },
+    )
+    assert len(matches) == 1
+    (resource,) = matches.values()
+    assert len(resource["Properties"]["Layers"]) == 2
+
+
+def test_skill_gap_lambda_role_only_queries_table_and_gsi():
+    template = _synth_template()
+
+    matches = template.find_resources(
+        "AWS::IAM::Policy",
+        {
+            "Properties": {
+                "PolicyDocument": {
+                    "Statement": assertions.Match.array_with(
+                        [
+                            assertions.Match.object_like(
+                                {"Action": "dynamodb:Query", "Effect": "Allow"}
+                            )
+                        ]
+                    )
+                }
+            }
+        },
+    )
+    # query_api_lambda and skill_gap_lambda each get their own Query-only policy.
+    assert len(matches) == 2
+
+
+def test_skill_gap_endpoint_exists_on_the_query_api_and_requires_a_key():
+    template = _synth_template()
+
+    template.has_resource_properties("AWS::ApiGateway::Resource", {"PathPart": "skill-gap"})
+
+    # query_api's own routes (root + {proxy+}) are both "ANY"; GET is unique to the
+    # skill-gap resource's method.
+    matches = template.find_resources("AWS::ApiGateway::Method", {"Properties": {"HttpMethod": "GET"}})
+    assert len(matches) == 1
+    (resource,) = matches.values()
+    assert resource["Properties"]["ApiKeyRequired"] is True
+
+    # Still exactly one API Gateway REST API, one API key, one usage plan — skill-gap
+    # is a sibling resource on the same API, not a second API.
+    template.resource_count_is("AWS::ApiGateway::RestApi", 1)
+    template.resource_count_is("AWS::ApiGateway::ApiKey", 1)
+    template.resource_count_is("AWS::ApiGateway::UsagePlan", 1)
+
+
 def test_every_pipeline_lambda_has_active_xray_tracing():
     template = _synth_template()
 
     matches = template.find_resources(
         "AWS::Lambda::Function", {"Properties": {"TracingConfig": {"Mode": "Active"}}}
     )
-    # fetch, extract, embed, threshold, alert_email, query_api, dlq_redrive — not the
-    # two CDK-provided custom-resource handlers (S3 auto-delete, bucket notifications),
-    # which CDK doesn't enable tracing on.
-    assert len(matches) == 7
+    # fetch, extract, embed, threshold, alert_email, query_api, dlq_redrive, skill_gap —
+    # not the two CDK-provided custom-resource handlers (S3 auto-delete, bucket
+    # notifications), which CDK doesn't enable tracing on.
+    assert len(matches) == 8
 
 
 def test_query_api_stage_has_xray_tracing_enabled():
@@ -568,8 +636,8 @@ def test_alert_email_lambda_has_common_layer_for_logging_and_metrics():
 def test_every_pipeline_lambda_has_an_error_rate_and_duration_alarm():
     template = _synth_template()
 
-    # 6 lambdas x 2 alarms each, plus 2 DLQ depth alarms (PLAN.md Phase 12.3).
-    template.resource_count_is("AWS::CloudWatch::Alarm", 14)
+    # 7 lambdas x 2 alarms each, plus 2 DLQ depth alarms (PLAN.md Phase 12.3).
+    template.resource_count_is("AWS::CloudWatch::Alarm", 16)
 
     error_rate_alarms = template.find_resources(
         "AWS::CloudWatch::Alarm",
@@ -585,7 +653,7 @@ def test_every_pipeline_lambda_has_an_error_rate_and_duration_alarm():
             }
         },
     )
-    assert len(error_rate_alarms) == 6
+    assert len(error_rate_alarms) == 7
 
 
 def test_error_rate_alarms_do_not_false_alarm_on_an_idle_lambda():

@@ -161,3 +161,16 @@ pulling this change so the threshold Lambda's bundled `model.json` has `feature_
 before deploying. Each query API response's postings now include a `top_factors` field
 (top 3 features by `abs(shap_value)`, most-influential first) once a posting has been
 scored — nothing to configure, it rides along with `score`.
+
+## Skill-gap analysis (Phase 14)
+
+No manual setup needed. `GET /skill-gap` is a new route on the same API Gateway/API key
+as the query API (Phase 8) — reuse the same `x-api-key`:
+
+```
+curl -H "x-api-key: $API_KEY" "https://<api-id>.execute-api.<region>.amazonaws.com/prod/skill-gap?limit=10"
+```
+
+Expect `{"skill_gaps": [{"skill": "...", "missing_count": N}, ...], "analyzed_postings":
+N}` — the skills most often required by postings the candidate scored below
+`FIT_THRESHOLD` on, that aren't already in the candidate profile's `skills` list.
