@@ -1,0 +1,2 @@
+# Lambda-specific dependencies for query_api (subset of the root requirements.txt),
+# installed into a deployment package or Lambda layer at build time.

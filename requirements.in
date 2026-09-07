@@ -1,0 +1,11 @@
+# Root dependencies shared across lambdas/ and ml/.
+# Compile with: pip-compile requirements.in -o requirements.txt
+# (infra/ manages its own CDK-toolkit venv and requirements.txt separately)
+
+boto3
+scikit-learn
+xgboost
+shap
+numpy
+pandas
+rank-bm25
