@@ -151,18 +151,10 @@ def test_extract_lambda_role_can_invoke_only_anthropic_bedrock_models():
                             {
                                 "Action": "bedrock:InvokeModel",
                                 "Effect": "Allow",
-                                "Resource": assertions.Match.object_like(
-                                    {
-                                        "Fn::Join": assertions.Match.array_with(
-                                            [
-                                                assertions.Match.array_with(
-                                                    [
-                                                        "::foundation-model/anthropic.*"
-                                                    ]
-                                                )
-                                            ]
-                                        )
-                                    }
+                                "Resource": assertions.Match.array_with(
+                                    [
+                                        "arn:aws:bedrock:us-east-1::foundation-model/anthropic.*"
+                                    ]
                                 ),
                             }
                         )
@@ -413,7 +405,7 @@ def test_threshold_dynamodb_trigger_fires_only_after_embedding_before_scoring():
                         "Pattern": (
                             '{"eventName":["MODIFY"],"dynamodb":{"NewImage":'
                             '{"embedding":{"B":[{"exists":true}]},'
-                            '"score":{"NULL":[true]}}}}'
+                            '"score":[{"exists":false}]}}}'
                         )
                     }
                 ]
