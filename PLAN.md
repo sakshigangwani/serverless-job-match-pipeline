@@ -284,14 +284,19 @@ directly in the synthesized template, not assumed.
 
 ## Phase 15 — Final validation & write-up
 
-1. Run the full system (core pipeline + DLQ/retry + SHAP explainability + skill-gap
-   analysis) end-to-end for several scheduled cycles; confirm DLQ redrive and the two ML
-   additions work against real data.
-2. Finalize `ml/evaluation_report.md` with real measured Precision@K/Recall@K/ROC-AUC
-   numbers and the baseline comparison table.
-3. Update `README.md` with architecture diagram, setup/deploy instructions, and the
-   resume-bullet framing from spec section 6 (general-purpose tool, pluggable candidate
-   profile) using your actual measured numbers.
+1. **Requires your own AWS deployment — not something that can be done on your behalf.**
+   Run the full system (core pipeline + DLQ/retry + SHAP explainability + skill-gap
+   analysis) end-to-end for several scheduled cycles against a real, deployed stack;
+   confirm DLQ redrive and the two ML additions work against real data.
+2. [DONE, Phase 6] `ml/evaluation_report.md` already has measured Precision@K/Recall@K/
+   ROC-AUC numbers and the baseline comparison table — from the synthetic demo dataset,
+   explicitly flagged as such. Re-run `python -m ml.generate_synthetic_dataset` (hand-
+   relabeled against your real resume + real scraped postings) then `python -m ml.train
+   && python -m ml.evaluate` to replace these with real numbers once you have a real
+   labeled set (spec §3.2's 150-300-posting manual labeling step).
+3. [DONE] `README.md` now has the architecture diagram, setup/deploy instructions, tech
+   stack, and the spec section 6 resume framing — with an explicit caveat not to quote
+   the synthetic-dataset metrics as real results until step 2 is redone for real.
 
 ---
 
