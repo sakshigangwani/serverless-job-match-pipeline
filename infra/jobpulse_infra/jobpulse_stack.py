@@ -57,7 +57,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 LAMBDAS_DIR = REPO_ROOT / "lambdas"
 LAYER_BUILD_ROOT = Path(__file__).resolve().parent / ".layer_build"
 
-DEFAULT_BEDROCK_MODEL_ID = "anthropic.claude-3-5-sonnet-20241022-v2:0"
+DEFAULT_BEDROCK_MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 DEFAULT_BEDROCK_EMBEDDING_MODEL_ID = "amazon.titan-embed-text-v2:0"
 DEFAULT_FIT_THRESHOLD = "0.7"
 
@@ -341,7 +341,16 @@ class JobPulseStack(Stack):
             iam.PolicyStatement(
                 actions=["bedrock:InvokeModel"],
                 resources=[
-                    f"arn:aws:bedrock:{self.region}::foundation-model/anthropic.*"
+                    # Claude on Bedrock is now invoked via cross-region inference
+                    # profiles (e.g. "us.anthropic.*"), which route to the underlying
+                    # foundation model in whichever US region has capacity — so the
+                    # role needs both the profile ARN itself and the foundation-model
+                    # ARNs in every region the "us." profile can route to.
+                    f"arn:aws:bedrock:{self.region}:{self.account}:inference-profile/anthropic.*",
+                    f"arn:aws:bedrock:{self.region}:{self.account}:inference-profile/us.anthropic.*",
+                    "arn:aws:bedrock:us-east-1::foundation-model/anthropic.*",
+                    "arn:aws:bedrock:us-east-2::foundation-model/anthropic.*",
+                    "arn:aws:bedrock:us-west-2::foundation-model/anthropic.*",
                 ],
             )
         )
@@ -378,6 +387,16 @@ class JobPulseStack(Stack):
             iam.PolicyStatement(
                 actions=["s3:GetObject", "s3:PutObject"],
                 resources=[raw_postings_bucket.arn_for_objects("candidate/*")],
+            )
+        )
+        # GetObject alone isn't sufficient for some SDK call paths (e.g. an existence
+        # check before a conditional read) — ListBucket on the bucket itself is also
+        # needed, scoped back down to the candidate/ prefix via a condition.
+        embed_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["s3:ListBucket"],
+                resources=[raw_postings_bucket.bucket_arn],
+                conditions={"StringLike": {"s3:prefix": "candidate/*"}},
             )
         )
         # UpdateItem only, not PutItem: this Lambda only ever patches a row extraction
@@ -480,7 +499,12 @@ class JobPulseStack(Stack):
                             "dynamodb": {
                                 "NewImage": {
                                     "embedding": {"B": [{"exists": True}]},
-                                    "score": {"NULL": [True]},
+                                    # `score` isn't a NULL-typed attribute pre-Phase-7 —
+                                    # Phase 5 leaves it entirely absent (so unscored
+                                    # postings fall out of the ScoreIndex GSI), and
+                                    # {"NULL": [True]} only matches an attribute that IS
+                                    # present with DynamoDB type NULL, not an absent key.
+                                    "score": [{"exists": False}],
                                 }
                             },
                         }
